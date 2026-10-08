@@ -1,3 +1,1015 @@
+# EvalForge
+
+> Agent Evaluation & Regression Testing Platform
+
+EvalForge 是一个面向 AI Agent 的自动化评测与回归测试平台，用于解决传统单元测试难以评估 Agent 非确定性输出的问题。
+
+平台通过统一的 Agent Adapter、Dataset、Metric、Experiment、Comparison 与 Regression 模型，对不同 Agent、Prompt、Model 版本进行批量测试、指标计算和版本对比，并通过 Regression Gate 判断新版本是否出现质量退化。
+
+---
+
+## Why EvalForge?
+
+传统软件可以通过明确的输入与输出进行测试：
+
+```text
+Input
+  ↓
+Function
+  ↓
+Expected Output
+```
+
+但 Agent 的执行过程通常包含：
+
+```text
+User Input
+    ↓
+LLM
+    ↓
+Tool Calling
+    ↓
+External Data
+    ↓
+LLM
+    ↓
+Final Answer
+```
+
+因此，仅判断：
+
+```python
+actual == expected
+```
+
+通常无法准确衡量 Agent 的真实质量。
+
+Agent 评测需要同时关注：
+
+- 最终回答质量
+- Tool 选择是否正确
+- Tool Arguments 是否正确
+- 执行过程是否稳定
+- Latency
+- Token / Cost
+- Citation
+- 不同版本之间是否出现 Regression
+
+EvalForge 的目标就是提供一套统一的 Agent Evaluation Harness。
+
+---
+
+# Core Workflow
+
+整体评测流程：
+
+```text
+Dataset
+   ↓
+Normalizer
+   ↓
+TestCase
+   ↓
+Agent Adapter
+   ↓
+Evaluation Runner
+   ↓
+Run Result
+   ↓
+Metrics
+   ↓
+Experiment
+   ↓
+Comparison
+   ↓
+Regression Detection
+   ↓
+Gate Decision
+```
+
+版本对比流程：
+
+```text
+Baseline Experiment
+        +
+Candidate Experiment
+        ↓
+Case Comparison
+        ↓
+Metric Comparison
+        ↓
+Experiment Comparison
+        ↓
+Regression Report
+        ↓
+PASS / FAIL
+```
+
+---
+
+# Features
+
+## 1. Unified Agent Adapter
+
+EvalForge 不依赖具体 Agent 框架。
+
+所有 Agent 只需要实现统一接口：
+
+```python
+from abc import ABC, abstractmethod
+
+
+class BaseAgent(ABC):
+
+    @abstractmethod
+    async def run(
+        self,
+        input_text: str,
+    ) -> dict:
+        ...
+```
+
+因此可以接入：
+
+```text
+Local Agent
+Remote Agent
+Research Agent
+RAG Agent
+LangChain Agent
+LangGraph Agent
+Custom Agent
+```
+
+Harness 不关心 Agent 内部实现，只负责：
+
+```text
+Input
+  ↓
+Agent
+  ↓
+Result
+  ↓
+Evaluation
+```
+
+---
+
+## 2. Dataset Normalization
+
+不同测试数据集通常具有不同字段：
+
+```json
+{
+  "question": "...",
+  "answer": "..."
+}
+```
+
+或者：
+
+```json
+{
+  "query": "...",
+  "expected": "..."
+}
+```
+
+EvalForge 通过 `FieldMapping` 与 `CaseNormalizer` 将不同数据格式统一转换为标准 `TestCase`。
+
+```text
+Raw Dataset
+    ↓
+Field Mapping
+    ↓
+Normalizer
+    ↓
+TestCase
+```
+
+标准结构示例：
+
+```json
+{
+  "id": "case_001",
+  "input_text": "What is RAG?",
+  "expected_output": "...",
+  "expected_tool_calls": [],
+  "metadata": {}
+}
+```
+
+这样 Evaluator 不需要感知原始 Dataset 的具体格式。
+
+---
+
+# 3. Evaluation Runner
+
+Evaluation Runner 是 Harness 的核心执行器。
+
+主要负责：
+
+```text
+TestCase
+   ↓
+Agent.run()
+   ↓
+Trace Collection
+   ↓
+Metric Calculation
+   ↓
+RunResult
+```
+
+支持：
+
+- Async Agent Execution
+- Batch Evaluation
+- Error Handling
+- Trace Collection
+- Metric Evaluation
+- Run Result Storage
+
+---
+
+# 4. Metrics
+
+EvalForge 支持针对不同维度进行评测。
+
+例如：
+
+```text
+Answer Quality
+Tool Accuracy
+Tool Arguments
+Latency
+Token Usage
+Citation Accuracy
+Citation Coverage
+```
+
+Metric 与 Runner 解耦，可以独立扩展新的指标。
+
+概念结构：
+
+```python
+Metric
+  │
+  ├── AnswerMetric
+  ├── ToolMetric
+  ├── LatencyMetric
+  └── CustomMetric
+```
+
+后续可扩展：
+
+```text
+LLM-as-a-Judge
+Correctness
+Relevance
+Completeness
+Faithfulness
+Recall@K
+MRR
+Cost
+```
+
+---
+
+# 5. Experiment
+
+单次 Run 无法代表一个 Agent 版本的整体能力。
+
+因此 EvalForge 引入 Experiment：
+
+```text
+Experiment
+│
+├── Agent Version
+├── Dataset
+├── Test Cases
+├── Runs
+├── Metrics
+└── Metadata
+```
+
+例如：
+
+```text
+experiment_agent_v1
+
+dataset:
+customer-support-v1
+
+agent:
+agent-v1
+
+cases:
+100
+
+answer_quality:
+0.82
+
+tool_accuracy:
+0.91
+
+latency:
+1.42s
+```
+
+Experiment 将大量 Case Run 聚合成一个完整的测试结果。
+
+---
+
+# 6. Experiment Comparison
+
+EvalForge 支持 Baseline / Candidate 实验对比。
+
+例如：
+
+```text
+Baseline
+agent-v1
+
+Candidate
+agent-v2
+```
+
+系统会自动匹配相同 Case：
+
+```text
+case_001
+baseline: 0.80
+candidate: 0.88
+
+delta:
++0.08
+```
+
+随后进行整体指标聚合：
+
+```text
+                    Baseline   Candidate   Delta
+
+Answer Quality        0.81       0.86      +0.05
+
+Tool Accuracy         0.92       0.89      -0.03
+
+Latency               1.20       1.48      +0.28
+```
+
+从而回答一个核心问题：
+
+> 新版本 Agent 是否真的优于旧版本？
+
+---
+
+# 7. Regression Detection
+
+仅展示 Delta 并不能自动判断版本是否可以发布。
+
+因此 EvalForge 引入 Regression Rule。
+
+例如：
+
+```text
+Answer Quality
+
+允许下降：
+2%
+```
+
+如果：
+
+```text
+baseline = 0.85
+candidate = 0.78
+```
+
+则：
+
+```text
+delta = -0.07
+```
+
+触发 Regression：
+
+```text
+REGRESSION DETECTED
+```
+
+---
+
+# 8. Quality Gate
+
+通过 `MetricGateRule` 可以为不同指标配置独立阈值：
+
+```text
+answer_quality >= -0.02
+
+tool_accuracy >= -0.03
+
+latency <= +20%
+```
+
+最终生成 Gate Result：
+
+```text
+PASS
+```
+
+或者：
+
+```text
+FAIL
+```
+
+例如：
+
+```text
+Agent V2 Evaluation
+
+Answer Quality
++4.2%    PASS
+
+Tool Accuracy
+-7.1%    FAIL
+
+Latency
++8.4%    PASS
+
+----------------
+
+Final Gate
+
+FAIL
+```
+
+这使 EvalForge 可以进一步接入 CI/CD。
+
+---
+
+# 9. Trace & Observability
+
+Agent 的最终 Answer 只是执行结果的一部分。
+
+为了定位 Agent 为什么失败，需要记录完整执行过程。
+
+EvalForge 使用 Trace Event 描述运行轨迹：
+
+```text
+agent.start
+
+llm.start
+llm.end
+
+tool.start
+tool.end
+
+retry
+
+error
+
+agent.end
+```
+
+例如：
+
+```text
+0 ms       agent.start
+
+120 ms     llm.start
+
+840 ms     llm.end
+
+860 ms     tool.search.start
+
+1320 ms    tool.search.end
+
+1340 ms    llm.start
+
+2150 ms    llm.end
+
+2180 ms    agent.end
+```
+
+可以进一步统计：
+
+```text
+LLM Latency
+Tool Latency
+Tool Calls
+Retry Count
+Errors
+Token Usage
+```
+
+---
+
+# Architecture
+
+```text
+                     ┌───────────────┐
+                     │   Frontend    │
+                     │ React + TS    │
+                     └───────┬───────┘
+                             │
+                             ▼
+                     ┌───────────────┐
+                     │    FastAPI    │
+                     │  API Server   │
+                     └───────┬───────┘
+                             │
+               ┌─────────────┼─────────────┐
+               │             │             │
+               ▼             ▼             ▼
+
+          PostgreSQL       Redis       Job Queue
+               │             │             │
+               │             └──────┬──────┘
+               │                    │
+               │                    ▼
+               │            Evaluation Worker
+               │                    │
+               │                    ▼
+               │               Agent Adapter
+               │                    │
+               │                    ▼
+               │                  Agent
+               │
+               ▼
+
+        Dataset / Experiment
+        Run / Metric
+        Comparison
+        Regression
+        Trace
+```
+
+---
+
+# Project Structure
+
+```text
+agent-evaluation-harness/
+│
+├── backend/
+│   └── app/
+│       │
+│       ├── main.py
+│       │
+│       ├── database.py
+│       │
+│       ├── models.py
+│       │
+│       ├── api/
+│       │   ├── datasets.py
+│       │   ├── evaluation.py
+│       │   ├── experiments.py
+│       │   └── comparisons.py
+│       │
+│       ├── agent/
+│       │   ├── base.py
+│       │   └── demo_agent.py
+│       │
+│       ├── datasets/
+│       │   ├── base.py
+│       │   └── mapping.py
+│       │
+│       ├── evaluator/
+│       │   ├── runner.py
+│       │   └── metrics.py
+│       │
+│       ├── harness/
+│       │   ├── contracts.py
+│       │   ├── comparison.py
+│       │   ├── regression.py
+│       │   └── trace.py
+│       │
+│       └── storage/
+│           └── run_store.py
+│
+├── frontend/
+│
+├── tests/
+│
+├── requirements.txt
+│
+└── README.md
+```
+
+> 实际目录以当前代码版本为准。
+
+---
+
+# Quick Start
+
+## 1. Clone
+
+```bash
+git clone <repository-url>
+
+cd agent-evaluation-harness/backend
+```
+
+---
+
+## 2. Create Virtual Environment
+
+Windows：
+
+```bash
+python -m venv .venv
+```
+
+激活：
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+Linux / WSL：
+
+```bash
+python3 -m venv .venv
+
+source .venv/bin/activate
+```
+
+---
+
+## 3. Install Dependencies
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+---
+
+## 4. Run Tests
+
+```bash
+python -m pytest -q
+```
+
+---
+
+## 5. Start FastAPI
+
+```bash
+uvicorn app.main:app --reload
+```
+
+默认访问：
+
+```text
+http://127.0.0.1:8000
+```
+
+FastAPI Swagger：
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+---
+
+# Example
+
+假设存在一个 Demo Agent：
+
+```python
+class DemoAgent(BaseAgent):
+
+    async def run(
+        self,
+        input_text: str,
+    ) -> dict:
+
+        return {
+            "answer":
+                f"Demo Agent response: {input_text}"
+        }
+```
+
+输入 TestCase：
+
+```json
+{
+  "id": "case_001",
+  "input_text": "Explain RAG",
+  "expected_output": "RAG combines retrieval with generation."
+}
+```
+
+Runner：
+
+```text
+TestCase
+   ↓
+DemoAgent
+   ↓
+RunResult
+   ↓
+Metric
+```
+
+生成类似：
+
+```json
+{
+  "run_id": "run_001",
+  "status": "completed",
+  "metrics": {
+    "answer_quality": 0.85,
+    "latency": 0.21
+  }
+}
+```
+
+多个 Run 最终组成：
+
+```text
+Experiment
+```
+
+并可以进一步：
+
+```text
+Experiment A
+     VS
+Experiment B
+```
+
+执行 Regression Analysis。
+
+---
+
+# API Design
+
+主要 API 规划：
+
+```text
+POST   /datasets
+GET    /datasets
+
+POST   /evaluations
+
+POST   /experiments
+GET    /experiments
+GET    /experiments/{id}
+
+POST   /comparisons
+GET    /comparisons/{id}
+
+POST   /evaluation-jobs
+GET    /evaluation-jobs/{id}
+POST   /evaluation-jobs/{id}/cancel
+```
+
+具体接口以当前版本 OpenAPI 文档为准。
+
+---
+
+# Roadmap
+
+## V0.1 - V0.10
+
+基础 Harness：
+
+```text
+Agent Adapter
+TestCase
+Dataset Normalization
+Runner
+Metrics
+Trace
+RunStore
+```
+
+## V0.11
+
+Experiment：
+
+```text
+Experiment
+Experiment Run
+Metric Aggregation
+```
+
+## V0.12
+
+Regression：
+
+```text
+Case Comparison
+Metric Comparison
+Experiment Comparison
+Regression Detection
+Metric Gate
+```
+
+## V0.13
+
+Async Evaluation Job：
+
+```text
+Job State Machine
+Concurrency
+Progress
+Cancellation
+```
+
+## V0.14
+
+Persistent Runtime：
+
+```text
+PostgreSQL
+Redis
+Worker
+Failure Recovery
+```
+
+## V0.15
+
+Observability：
+
+```text
+Trace Timeline
+LLM Trace
+Tool Trace
+Latency
+Token Usage
+Error Tracking
+```
+
+## V0.16
+
+Dataset Management：
+
+```text
+Dataset Version
+Benchmark
+Tags
+Filtering
+```
+
+## V0.17
+
+Advanced Evaluation：
+
+```text
+LLM-as-a-Judge
+Correctness
+Relevance
+Completeness
+Faithfulness
+Citation Evaluation
+```
+
+## V0.18
+
+Experiment Management：
+
+```text
+Agent Version
+Prompt Version
+Model Config
+Experiment Tracking
+```
+
+## V0.19
+
+CI/CD：
+
+```text
+GitHub Actions
+Regression Dataset
+Quality Gate
+PR Blocking
+```
+
+## V1.0
+
+目标形成完整的：
+
+```text
+Agent Evaluation Platform
+
+Dataset
+   ↓
+Evaluation
+   ↓
+Experiment
+   ↓
+Comparison
+   ↓
+Regression
+   ↓
+Gate
+   ↓
+Observability
+   ↓
+CI/CD
+```
+
+---
+
+# Design Principles
+
+EvalForge 主要遵循以下设计原则：
+
+### Framework Agnostic
+
+Harness 不依赖具体 Agent Framework。
+
+```text
+LangGraph
+LangChain
+Custom Agent
+Remote Agent
+```
+
+都可以通过 Adapter 接入。
+
+### Evaluation First
+
+平台重点不是运行 Agent，而是：
+
+```text
+Measure
+Compare
+Detect
+Decide
+```
+
+### Reproducible Experiments
+
+每次实验应尽可能记录：
+
+```text
+Agent Version
+Dataset Version
+Prompt
+Model
+Config
+Metrics
+Trace
+```
+
+便于结果复现和版本比较。
+
+### Extensible
+
+Agent、Dataset、Metric、Storage 与 Runner 尽量通过抽象接口解耦。
+
+新增能力不应修改 Harness 核心执行流程。
+
+---
+
+# Vision
+
+传统软件已经拥有成熟的：
+
+```text
+Unit Test
+Integration Test
+Regression Test
+CI/CD
+```
+
+但 Agent 系统具有：
+
+```text
+Non-deterministic Output
+Tool Calling
+LLM Dependency
+External Environment
+Semantic Quality
+```
+
+因此需要新的测试基础设施。
+
+EvalForge 希望将传统软件工程中的：
+
+```text
+Test
+Benchmark
+Regression
+Quality Gate
+Observability
+```
+
+扩展到 Agent 系统中，让 Agent 的每一次版本迭代都可以：
+
+```text
+被运行
+被测量
+被比较
+被追踪
+被验证
+```
 0.1版本项目框架思考：
 我要做的是一个 Agent Evaluation Harness。
 
