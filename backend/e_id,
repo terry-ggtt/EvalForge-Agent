@@ -1,0 +1,6 @@
+                run_id                | case_id  |  status   | score |                                error                                 
+--------------------------------------+----------+-----------+-------+----------------------------------------------------------------------
+ 9cfb7fa1-5755-483c-9961-01b123d65494 | case-001 | succeeded |     1 | 
+ 64bf35fb-60d9-4a1e-be13-100227d84f9c | case-001 | failed    |     0 | DemoAgent.run() missing 1 required positional argument: 'input_text'
+(2 rows)
+

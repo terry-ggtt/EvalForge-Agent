@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+aiosqlite
+pytest
+httpx2
+langgraph
+langchain-core
+langchain-openai
+psycopg[binary,pool]>=3.2
