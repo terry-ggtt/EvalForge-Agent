@@ -252,6 +252,14 @@ class ExperimentService:
         experiment_id: str,
         run_id: str,
     ) -> None:
+        """
+        Ensure a persisted Run is linked
+        to an Experiment exactly once.
+
+        Reuse the existing idempotent
+        ExperimentStore.attach_run().
+        """
+
         if not experiment_id:
             raise ValueError(
                 "experiment_id must not be empty"
@@ -262,7 +270,7 @@ class ExperimentService:
                 "run_id must not be empty"
             )
 
-        await self.experiment_store.ensure_run_linked(
+        await self.add_run(
             experiment_id=experiment_id,
             run_id=run_id,
         )

@@ -84,12 +84,3 @@ class ExperimentStore(
     ) -> None:
         raise NotImplementedError
         
-
-    @abstractmethod
-    async def ensure_run_linked(
-        self,
-        *,
-        experiment_id: str,
-        run_id: str,
-    ) -> None:
-        raise NotImplementedError

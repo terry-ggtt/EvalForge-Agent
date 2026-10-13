@@ -604,73 +604,113 @@ agent-evaluation-harness/
 
 # Quick Start
 
-## 1. Clone
-
-```bash
-git clone <repository-url>
-
-cd agent-evaluation-harness/backend
-```
-
----
-
-## 2. Create Virtual Environment
-
-Windows：
-
-```bash
-python -m venv .venv
-```
-
-激活：
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-Linux / WSL：
-
-```bash
-python3 -m venv .venv
-
-source .venv/bin/activate
-```
-
----
-
-## 3. Install Dependencies
-
-```bash
-python -m pip install -r requirements.txt
-```
-
----
-
-## 4. Run Tests
-
-```bash
-python -m pytest -q
-```
-
----
-
-## 5. Start FastAPI
-
-```bash
-uvicorn app.main:app --reload
-```
-
-默认访问：
+以下命令适用于当前 Ubuntu / WSL 项目，前端实际目录为 `frontend/`。完整启动需要三个终端：API 接收请求，Worker 执行异步评测，前端展示任务和结果。
 
 ```text
-http://127.0.0.1:8000
+浏览器（localhost:5173）
+  → FastAPI（127.0.0.1:8013）
+  → PostgreSQL Job Queue
+  → 独立 Worker
+  → Experiment / Run / Trace
 ```
 
-FastAPI Swagger：
+## 1. 启动前准备
+
+- PostgreSQL 已运行，且已有 Run / Experiment 表和 Evaluation Job 迁移已就绪。
+- `backend/.env` 中配置有效的 `HARNESS_DATABASE_URL`；不要将数据库凭据提交到仓库。
+- 使用现有 `backend/.venv` Python 环境。
+- 前端使用 Node 22.13+（已在 22.23.3 验证）；系统 Node 18 无法运行当前 Vite 8。
+- 前端依赖已安装；首次安装可在仓库根目录执行 `npm --prefix frontend ci`，执行前先切换到 Node 22。
+
+## 2. 终端一：启动后端 API
+
+```bash
+cd /home/terry/projects/agent-evaluation-harness/backend
+.venv/bin/python -m uvicorn app.main:app --env-file .env --host 0.0.0.0 --port 8013
+```
+
+查看 API：
+
+- 健康检查：<http://127.0.0.1:8013/health>
+- Swagger 文档：<http://127.0.0.1:8013/docs>
+
+本地使用 `8013` 避免 Windows 上已有 `8000` 服务冲突。若改用其他端口，需要同步修改前端的 `VITE_API_BASE_URL`。
+
+## 3. 终端二：启动评测 Worker
+
+```bash
+cd /home/terry/projects/agent-evaluation-harness/backend
+.venv/bin/python -m app.worker
+```
+
+Worker 会读取 `backend/.env`。API 与 Worker 必须连接同一个数据库。只启动 API 和前端时可以创建任务，但排队任务需要 Worker 才能执行。
+
+## 4. 终端三：启动前端
+
+```bash
+cd /home/terry/projects/agent-evaluation-harness
+nvm use 22
+VITE_API_BASE_URL=http://127.0.0.1:8013 npm --prefix frontend run dev -- --host 0.0.0.0 --port 5173 --strictPort
+```
+
+`--strictPort` 可避免 5173 被占用时 Vite 自动切到另一个端口，导致前端来源与后端 CORS 配置不一致。若端口被占用，请先确认已有服务，再决定停止旧实例或复用它。
+
+在 Windows 浏览器中使用以下地址：
+
+- Evaluation Jobs：<http://localhost:5173/evaluation-jobs>
+- Experiments：<http://localhost:5173/experiments>
+- Runs：<http://localhost:5173/runs>
+
+也可以使用 `http://127.0.0.1:5173`。`--host 0.0.0.0` 是监听配置，浏览器地址请使用 `localhost` 或 `127.0.0.1`。
+
+## 5. 加载失败与 CORS 排查
+
+当前后端 `backend/app/main.py` 中的 CORS 只允许：
 
 ```text
-http://127.0.0.1:8000/docs
+http://localhost:5173
+http://127.0.0.1:5173
 ```
+
+如果使用 Vite 输出的 WSL Network 地址（例如 `http://172.17.3.158:5173`）打开前端，浏览器请求来源不在允许列表中。后端会返回：
+
+```text
+OPTIONS /health                         400 Bad Request
+OPTIONS /experiments?limit=100           400 Bad Request
+OPTIONS /evaluation-jobs?...             400 Bad Request
+Disallowed CORS origin
+```
+
+此时界面可能显示 `Failed to load experiments` 或 `Unable to connect to the API`。这是跨域预检被拒绝，不代表数据库没有数据。
+
+处理顺序：
+
+1. 将浏览器地址改为 <http://localhost:5173/evaluation-jobs>，刷新后重试；如果仅访问地址不对，无需重启服务。
+2. 确认前端实际端口为 `5173`，并且启动时设置的 `VITE_API_BASE_URL` 与真实 API 端口一致。前端未设置该变量时默认请求 `http://127.0.0.1:8000`。
+3. 修改 `VITE_API_BASE_URL` 后需要重新启动 Vite；仅刷新浏览器不会更改已启动进程的环境变量。
+4. 如确需通过其他 IP / 域名访问，应在后端 `allow_origins` 中显式加入对应的完整来源（协议、主机、端口），再重启 API。WSL IP 可能变化；本机开发优先使用 `localhost`。
+
+检查允许来源的预检请求：
+
+```bash
+curl -i -X OPTIONS 'http://127.0.0.1:8013/evaluation-jobs?limit=20&offset=0' \
+  -H 'Origin: http://localhost:5173' \
+  -H 'Access-Control-Request-Method: GET' \
+  -H 'Access-Control-Request-Headers: content-type'
+```
+
+正常应返回 `200 OK` 和 `access-control-allow-origin: http://localhost:5173`。直接调用 GET 接口成功，也仍需检查浏览器来源对应的 OPTIONS 预检。
+
+前端验证命令（仓库根目录，使用 Node 22）：
+
+```bash
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
+npm --prefix frontend run lint
+npm --prefix frontend test
+```
+
+更多前端页面、表单和轮询说明见 [frontend/README.md](frontend/README.md)。
 
 ---
 

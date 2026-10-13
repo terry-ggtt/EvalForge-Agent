@@ -64,6 +64,7 @@ class EvaluationJobStore(ABC):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
         experiment_id: str,
     ) -> EvaluationJob:
         ...
@@ -74,6 +75,7 @@ class EvaluationJobStore(ABC):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
         completed_cases: int,
         failed_cases: int,
     ) -> EvaluationJob:
@@ -102,6 +104,7 @@ class EvaluationJobStore(ABC):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
         error: str,
     ) -> EvaluationJob:
         ...
@@ -112,6 +115,7 @@ class EvaluationJobStore(ABC):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
     ) -> EvaluationJob:
         ...
     @abstractmethod

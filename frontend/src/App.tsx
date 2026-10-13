@@ -34,6 +34,12 @@ import {
 import {
   RunTimelinePage,
 } from "./pages/RunTimelinePage";
+import { EvaluationJobsPage } from "./pages/EvaluationJobsPage";
+import { EvaluationJobDetailPage } from "./pages/EvaluationJobDetailPage";
+import { CreateEvaluationJobPage } from "./pages/CreateEvaluationJobPage";
+import { ExperimentDetailPage } from "./pages/ExperimentDetailPage";
+
+/** @returns Existing dashboard routes and asynchronous evaluation management routes. */
 function App() {
 
   return (
@@ -112,6 +118,10 @@ function App() {
             <RunExperimentPage />
           }
         />
+        <Route path="evaluation-jobs" element={<EvaluationJobsPage />} />
+        <Route path="evaluation-jobs/new" element={<CreateEvaluationJobPage />} />
+        <Route path="evaluation-jobs/:jobId" element={<EvaluationJobDetailPage />} />
+        <Route path="experiments/:experimentId" element={<ExperimentDetailPage />} />
       </Route>
 
     </Routes>

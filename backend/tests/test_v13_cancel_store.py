@@ -140,6 +140,7 @@ async def test_running_job_cancel_in_postgres():
             cancelled = await store.mark_cancelled(
                 job_id=created.job_id,
                 worker_id="cancel-test-worker",
+                attempt_count=claimed.attempt_count,
             )
 
             assert cancelled.status == "cancelled"

@@ -8,6 +8,9 @@ from app.harness.experiment import (
     EvaluationExperiment,
     ExperimentStatus,
 )
+from app.harness.experiment_errors import(
+    ExperimentStateError
+)
 from datetime import datetime
 class InMemoryExperimentStore(
     ExperimentStore
@@ -135,12 +138,8 @@ class InMemoryExperimentStore(
                     f"{experiment_id}"
                 )
 
-            if (
-                experiment.status
-                != "running"
-            ):
-
-                raise RuntimeError(
+            if experiment.status != "running":
+                raise ExperimentStateError(
                     "Runs can only be attached "
                     "to a running experiment."
                 )

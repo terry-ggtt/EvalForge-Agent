@@ -338,6 +338,7 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
         experiment_id: str,
     ) -> EvaluationJob:
 
@@ -346,13 +347,22 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
         SET
             experiment_id = %s,
             updated_at = NOW()
+
         WHERE job_id = %s
         AND worker_id = %s
-        AND status = 'running'
+        AND attempt_count = %s
+        AND lease_expires_at > NOW()
+
+        AND status IN (
+            'running',
+            'cancel_requested'
+        )
+
         AND (
             experiment_id IS NULL
             OR experiment_id = %s
         )
+
         RETURNING *
         """
 
@@ -364,6 +374,7 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
                         experiment_id,
                         job_id,
                         worker_id,
+                        attempt_count,
                         experiment_id,
                     ),
                 )
@@ -374,12 +385,12 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
             row,
             job_id,
         )
-
     async def update_progress(
         self,
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
         completed_cases: int,
         failed_cases: int,
     ) -> EvaluationJob:
@@ -396,12 +407,14 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
             failed_cases = %s,
             updated_at = NOW()
         WHERE job_id = %s
-        AND worker_id = %s
-        AND status = 'running'
-        AND completed_cases <= %s
-        AND failed_cases <= %s
-        AND total_cases >= %s
-        RETURNING *
+            AND worker_id = %s
+            AND attempt_count = %s
+            AND lease_expires_at > NOW()
+            AND status IN ('running', 'cancel_requested')
+            AND completed_cases <= %s
+            AND failed_cases <= %s
+            AND total_cases >= %s
+            RETURNING *
         """
 
         async with self._pool.connection() as conn:
@@ -413,6 +426,7 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
                         failed_cases,
                         job_id,
                         worker_id,
+                        attempt_count,
                         completed_cases,
                         failed_cases,
                         completed_cases + failed_cases,
@@ -530,7 +544,9 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
     ) -> EvaluationJob:
+
         query = """
         UPDATE harness_evaluation_jobs
         SET
@@ -541,6 +557,9 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
 
         WHERE job_id = %s
         AND worker_id = %s
+        AND attempt_count = %s
+        AND lease_expires_at > NOW()
+
         AND status = 'cancel_requested'
 
         RETURNING *
@@ -550,8 +569,13 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
             async with conn.cursor() as cur:
                 await cur.execute(
                     query,
-                    (job_id, worker_id),
+                    (
+                        job_id,
+                        worker_id,
+                        attempt_count,
+                    ),
                 )
+
                 row = await cur.fetchone()
 
         return self._require_updated(
@@ -577,6 +601,7 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
         *,
         job_id: str,
         worker_id: str,
+        attempt_count: int,
         error: str,
     ) -> EvaluationJob:
 
@@ -588,9 +613,17 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
             finished_at = NOW(),
             lease_expires_at = NULL,
             updated_at = NOW()
+
         WHERE job_id = %s
         AND worker_id = %s
-        AND status = 'running'
+        AND attempt_count = %s
+        AND lease_expires_at > NOW()
+
+        AND status IN (
+            'running',
+            'cancel_requested'
+        )
+
         RETURNING *
         """
 
@@ -602,6 +635,7 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
                         error,
                         job_id,
                         worker_id,
+                        attempt_count,
                     ),
                 )
 

@@ -41,3 +41,8 @@ export function runExperiment(
     },
   );
 }
+
+/** @param experimentId Opaque ID. @param signal Query cancellation. @returns Persisted experiment and its run membership. */
+export function getExperiment(experimentId: string, signal?: AbortSignal) {
+  return apiRequest<Experiment>(`/experiments/${encodeURIComponent(experimentId)}`, { signal });
+}

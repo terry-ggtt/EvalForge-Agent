@@ -14,6 +14,10 @@ const navigation = [
     path: "/experiments",
   },
   {
+    label: "Evaluation Jobs",
+    path: "/evaluation-jobs",
+  },
+  {
     label: "Runs",
     path: "/runs",
   },
@@ -90,7 +94,7 @@ export function AppShell() {
               text-slate-500
             "
           >
-            Frontend V0.1
+            Frontend V0.3
           </div>
 
         </div>
@@ -102,7 +106,7 @@ export function AppShell() {
           mx-auto
           grid
           max-w-7xl
-          grid-cols-[220px_1fr]
+          grid-cols-1 md:grid-cols-[220px_1fr]
           gap-8
           px-6
           py-8

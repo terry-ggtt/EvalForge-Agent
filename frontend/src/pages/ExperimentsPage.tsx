@@ -218,7 +218,7 @@ export function ExperimentsPage() {
                       "
                     >
                       {
-                        experiment.name
+                        <Link to={`/experiments/${encodeURIComponent(experiment.experiment_id)}`} className="hover:underline">{experiment.name}</Link>
                       }
                     </td>
 
