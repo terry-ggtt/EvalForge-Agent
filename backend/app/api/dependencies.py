@@ -29,6 +29,17 @@ from app.harness.run_query_service import (
 from app.harness.experiment_comparison_service import (
     ExperimentComparisonService,
 )
+
+from app.jobs.store import (
+    EvaluationJobStore,
+)
+
+
+def get_evaluation_job_store(
+    request: Request,
+) -> EvaluationJobStore:
+
+    return request.app.state.evaluation_job_store
 def get_run_store(
     request: Request,
 ) -> RunStore:

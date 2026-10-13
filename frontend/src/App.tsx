@@ -22,6 +22,18 @@ import {
 import {
   RunExperimentPage,
 } from "./pages/RunExperimentPage";
+
+import {
+  RunsPage,
+} from "./pages/RunsPage";
+
+import {
+  RunDetailPage,
+} from "./pages/RunDetailPage";
+
+import {
+  RunTimelinePage,
+} from "./pages/RunTimelinePage";
 function App() {
 
   return (
@@ -52,10 +64,23 @@ function App() {
         <Route
           path="runs"
           element={
-            <PlaceholderPage
-              title="Runs"
-              description="Run query, detail and replay timeline."
-            />
+            <RunsPage />
+          }
+        />
+
+
+        <Route
+          path="runs/:runId/timeline"
+          element={
+            <RunTimelinePage />
+          }
+        />
+
+
+        <Route
+          path="runs/:runId"
+          element={
+            <RunDetailPage />
           }
         />
 

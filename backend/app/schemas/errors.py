@@ -1,5 +1,7 @@
 from typing import Any
-
+from app.jobs.errors import (
+    EvaluationJobNotFoundError,
+)
 from pydantic import (
     BaseModel,
     Field,
@@ -44,3 +46,4 @@ STANDARD_ERROR_RESPONSES = {
         "description": "Internal server error",
     },
 }
+

@@ -245,3 +245,24 @@ class ExperimentService:
                     limit
             )
         )
+
+    async def ensure_run_linked(
+        self,
+        *,
+        experiment_id: str,
+        run_id: str,
+    ) -> None:
+        if not experiment_id:
+            raise ValueError(
+                "experiment_id must not be empty"
+            )
+
+        if not run_id:
+            raise ValueError(
+                "run_id must not be empty"
+            )
+
+        await self.experiment_store.ensure_run_linked(
+            experiment_id=experiment_id,
+            run_id=run_id,
+        )

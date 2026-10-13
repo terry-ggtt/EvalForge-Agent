@@ -40,7 +40,9 @@ from app.harness.experiment_errors import (
 from app.harness.replay import (
     RunNotFoundError,
 )
-
+from app.jobs.errors import (
+    EvaluationJobNotFoundError,
+)
 
 logger = logging.getLogger(
     __name__
@@ -86,6 +88,9 @@ NOT_FOUND_CODES = {
 
     ExperimentComparisonNotFoundError:
         "experiment_not_found",
+
+    EvaluationJobNotFoundError:
+            "evaluation_job_not_found",
 }
 
 
@@ -107,6 +112,8 @@ CONFLICT_CODES = {
 
     DatasetRunNotFoundError:
         "dataset_run_missing",
+
+    
 }
 
 

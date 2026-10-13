@@ -1073,3 +1073,61 @@ class PostgresExperimentStore(
                         "transition state."
                     )
                 )
+
+    async def ensure_run_linked(
+        self,
+        *,
+        experiment_id: str,
+        run_id: str,
+    ) -> None:
+        query = """
+        UPDATE harness_experiments
+        SET
+            run_ids = (
+                COALESCE(run_ids, '[]'::jsonb)
+                || jsonb_build_array(%s::text)
+            ),
+            updated_at = NOW()
+        WHERE experiment_id = %s
+        AND NOT (
+            COALESCE(run_ids, '[]'::jsonb)
+            @> jsonb_build_array(%s::text)
+        )
+        RETURNING experiment_id
+        """
+
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    query,
+                    (
+                        run_id,
+                        experiment_id,
+                        run_id,
+                    ),
+                )
+
+                updated = await cur.fetchone()
+
+                if updated is not None:
+                    return
+
+                # UPDATE 0 rows can mean either:
+                # 1. Run is already linked
+                # 2. Experiment does not exist
+                await cur.execute(
+                    """
+                    SELECT 1
+                    FROM harness_experiments
+                    WHERE experiment_id = %s
+                    """,
+                    (experiment_id,),
+                )
+
+                exists = await cur.fetchone()
+
+                if exists is None:
+                    raise LookupError(
+                        "Experiment not found: "
+                        f"{experiment_id}"
+                    )

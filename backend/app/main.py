@@ -72,6 +72,14 @@ from app.comparison_factory import (
 from app.api.errors import (
     register_exception_handlers,
 )
+
+from app.jobs.postgres_store import (
+    PostgresEvaluationJobStore,
+)
+
+from app.api.evaluation_jobs import (
+    router as evaluation_jobs_router,
+)
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
@@ -91,7 +99,10 @@ async def lifespan(
             PostgresExperimentStore(
                 database_url
             )
-        ) as experiment_store:
+         as experiment_store,
+            PostgresEvaluationJobStore(
+            database_url
+        ) as job_store,):
 
             await (
                 run_store.initialize()
@@ -101,6 +112,7 @@ async def lifespan(
                 experiment_store
                 .initialize()
             )
+            await job_store.initialize()
 
             experiment_service = (
                 ExperimentService(
@@ -157,6 +169,7 @@ async def lifespan(
             app.state.experiment_store = (
                 experiment_store
             )
+            app.state.evaluation_job_store = job_store
 
             app.state.experiment_service = (
                 experiment_service
@@ -246,6 +259,9 @@ def create_app() -> FastAPI:
 
     application.include_router(
         gates_router
+    )
+    application.include_router(
+        evaluation_jobs_router
     )
 
     return application
