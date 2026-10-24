@@ -1,3 +1,4 @@
+from app.registry.models import RegistryError
 from typing import Any
 from uuid import uuid4
 
@@ -94,6 +95,25 @@ class PostgresEvaluationJobStore(EvaluationJobStore):
         self,
         payload: EvaluationJobPayload,
     ) -> EvaluationJob:
+        """Create payload job, resolving exact published digest before INSERT; unbound path is unchanged.
+
+        Returns persisted job. Missing Registry migration or unpublished binding
+        fails before enqueue; request-supplied digest is never authoritative.
+        """
+        payload = EvaluationJobPayload.model_validate(payload.model_dump(mode="python"))
+        if payload.adapter_id is not None:
+            async with self._pool.connection() as conn:
+                cursor = await conn.execute("SELECT to_regclass('harness_mapping_artifacts') AS name")
+                if (await cursor.fetchone())["name"] is None:
+                    raise RegistryError("apply_v015_mapping_evaluation_migration", 503)
+                cursor = await conn.execute(
+                    "SELECT mapping_digest FROM harness_adapter_versions WHERE profile_id=%s AND version=%s",
+                    (payload.adapter_id, payload.adapter_version),
+                )
+                version = await cursor.fetchone()
+                if version is None:
+                    raise RegistryError("published_adapter_version_not_found", 404)
+                payload = payload.model_copy(update={"adapter_mapping_digest": version["mapping_digest"]})
         job_id = f"job-{uuid4().hex}"
 
         query = """

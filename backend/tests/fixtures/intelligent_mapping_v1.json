@@ -1,0 +1,164 @@
+{
+  "raw_response": {
+    "answer": {
+      "text": "已找到 VPN 配置说明。"
+    },
+    "telemetry": {
+      "events": [
+        {
+          "kind": "llm.finished",
+          "at": "2026-10-19T09:00:00+08:00",
+          "engine": "vendor-model",
+          "usage": {
+            "prompt": 12,
+            "completion": 4
+          },
+          "finish": "stop"
+        },
+        {
+          "kind": "tool.started",
+          "name": "search",
+          "params": {
+            "query": "VPN"
+          },
+          "id": "call-7"
+        },
+        {
+          "kind": "vendor.debug",
+          "detail": "Only retained as raw evidence"
+        }
+      ]
+    }
+  },
+  "mapping": {
+    "spec_version": "1.0",
+    "name": "heterogeneous-agent-example",
+    "response": {
+      "fields": [
+        {
+          "target": "$.output_text",
+          "operation": {
+            "op": "coalesce",
+            "paths": [
+              "$.answer.text",
+              "$.fallback_answer"
+            ]
+          },
+          "value_type": "string",
+          "on_missing": "error",
+          "on_null": "error"
+        }
+      ]
+    },
+    "trace": {
+      "events_path": "$.telemetry.events",
+      "type_path": "$.kind",
+      "on_unknown_event": "preserve_raw",
+      "on_missing": "omit",
+      "on_null": "omit",
+      "rules": [
+        {
+          "source_type": "llm.finished",
+          "event_type": "model_result",
+          "fields": [
+            {
+              "target": "$.timestamp",
+              "operation": {
+                "op": "extract",
+                "path": "$.at"
+              },
+              "value_type": "datetime",
+              "on_missing": "null",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.model",
+              "operation": {
+                "op": "rename",
+                "path": "$.engine"
+              },
+              "value_type": "string",
+              "on_missing": "null",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.usage.input_tokens",
+              "operation": {
+                "op": "cast",
+                "path": "$.usage.prompt",
+                "to": "integer"
+              },
+              "value_type": "integer",
+              "on_missing": "null",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.usage.total_tokens",
+              "operation": {
+                "op": "sum_if_present",
+                "paths": [
+                  "$.usage.prompt",
+                  "$.usage.completion"
+                ]
+              },
+              "value_type": "number",
+              "on_missing": "null",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.metadata.finish_reason",
+              "operation": {
+                "op": "enum_map",
+                "path": "$.finish",
+                "values": {
+                  "stop": "completed",
+                  "length": "truncated"
+                },
+                "on_unmapped": "null"
+              },
+              "value_type": "string",
+              "on_missing": "omit",
+              "on_null": "preserve"
+            }
+          ]
+        },
+        {
+          "source_type": "tool.started",
+          "event_type": "tool_call",
+          "fields": [
+            {
+              "target": "$.payload.tool_name",
+              "operation": {
+                "op": "rename",
+                "path": "$.name"
+              },
+              "value_type": "string",
+              "on_missing": "null",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.arguments",
+              "operation": {
+                "op": "extract",
+                "path": "$.params"
+              },
+              "value_type": "object",
+              "on_missing": "null",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.call_id",
+              "operation": {
+                "op": "extract",
+                "path": "$.id"
+              },
+              "value_type": "string",
+              "on_missing": "null",
+              "on_null": "preserve"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -91,7 +91,9 @@ class CaseResult(BaseModel):
         default_factory=list
     )
 
-    score: float = 0.0
+    score: float | None = 0.0
+
+    failure_kind: Literal["agent_execution", "mapping", "evaluation"] | None = None
 
     trace: list[TraceEvent] = Field(
         default_factory=list
@@ -102,7 +104,7 @@ class CaseResult(BaseModel):
 
 class EvaluationReport(BaseModel):
     results: list[CaseResult]
-    average_score: float
+    average_score: float | None
 
 class ExpectedToolCall(BaseModel):
     tool_name: str

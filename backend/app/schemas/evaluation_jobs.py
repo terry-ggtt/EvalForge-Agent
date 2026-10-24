@@ -17,6 +17,7 @@ from app.jobs.models import (
     EvaluationJobPayload,
     EvaluationJobStatus,
     EvaluationJobPage,
+    validate_adapter_binding,
 )
 
 
@@ -26,6 +27,9 @@ class CreateEvaluationJobRequest(BaseModel):
     dataset_version: str = Field(min_length=1)
 
     agent_version: str = Field(min_length=1)
+
+    adapter_id: str | None = Field(default=None, strict=True, min_length=1, max_length=200, pattern=r"\S")
+    adapter_version: int | None = Field(default=None, strict=True, ge=1)
 
     model_name: str | None = None
 
@@ -57,6 +61,8 @@ class CreateEvaluationJobRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_case_ids(self):
+        """Validate this request's case identities and exact optional adapter pair; return self or ValueError."""
+        validate_adapter_binding(self.adapter_id, self.adapter_version)
         ids = [case.id for case in self.cases]
 
         if any(
@@ -76,10 +82,12 @@ class CreateEvaluationJobRequest(BaseModel):
         return self
 
     def to_domain(self) -> EvaluationJobPayload:
+        """Return canonical payload from this request; mapping digest is always resolved server-side."""
         return EvaluationJobPayload(
             name=self.name,
             dataset_version=self.dataset_version,
             agent_version=self.agent_version,
+            adapter_id=self.adapter_id, adapter_version=self.adapter_version,
             model_name=self.model_name,
             prompt_version=self.prompt_version,
             metadata=dict(self.metadata),
@@ -94,6 +102,9 @@ class EvaluationJobResponse(BaseModel):
     job_id: str
 
     status: EvaluationJobStatus
+    adapter_id: str | None = None
+    adapter_version: int | None = None
+    adapter_mapping_digest: str | None = None
 
     name: str
 
@@ -130,10 +141,12 @@ class EvaluationJobResponse(BaseModel):
         cls,
         job: EvaluationJob,
     ) -> "EvaluationJobResponse":
-
+        """Return API view of job, including immutable optional published binding; no raw artifacts exposed."""
         return cls(
             job_id=job.job_id,
             status=job.status,
+            adapter_id=job.payload.adapter_id, adapter_version=job.payload.adapter_version,
+            adapter_mapping_digest=job.payload.adapter_mapping_digest,
             name=job.payload.name,
             dataset_version=job.payload.dataset_version,
             agent_version=job.payload.agent_version,

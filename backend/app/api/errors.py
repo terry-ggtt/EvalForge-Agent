@@ -1,3 +1,4 @@
+from app.harness.metric_semantics import MetricSemanticsError
 import logging
 
 from typing import Any
@@ -95,6 +96,7 @@ NOT_FOUND_CODES = {
 
 
 CONFLICT_CODES = {
+    MetricSemanticsError: "metric_semantics_unavailable",
     ExperimentStateError:
         "experiment_state_conflict",
 

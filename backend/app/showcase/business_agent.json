@@ -1,0 +1,188 @@
+{
+  "version": "interview-curated-2026-10-15",
+  "title": "Business Agent · RAG 失败诊断与修正",
+  "scope": "7 个精选合成案例；诊断演示集，非未见测试集、单变量消融或生产准确率证明。",
+  "source": "D:/ai_agent/project agent/evals/corpus",
+  "corpus_sha256": "810a9277549d1ab2ff3d437968d68f0f9342efeb7f1da3d6ccec04d87e197644",
+  "chunks": 53,
+  "cases": [
+    {
+      "id": "q077",
+      "title": "相近制度干扰：出差变更",
+      "input_text": "审批过的差旅日期改变后如何处理申请？",
+      "expected_output": "更新；主管；预算",
+      "baseline_profile": "bm25",
+      "candidate_profile": "hybrid_guarded",
+      "evaluation": {
+        "relevant_ids": [
+          "fa07bae21c6d4d7e293530c5"
+        ],
+        "keyword_groups": [
+          [
+            "更新",
+            "修改",
+            "变更"
+          ],
+          [
+            "主管"
+          ],
+          [
+            "预算"
+          ]
+        ],
+        "source_spans": [
+          {
+            "document": "travel.md",
+            "contains": "已批准出差行程变更需更新原申请并重新由直属主管确认，新增费用需补充预算依据。"
+          }
+        ]
+      },
+      "explanation": "真实 BM25 排序与 Hybrid/RRF/Cross-Encoder 的逐阶段候选、引用及延迟对比。"
+    },
+    {
+      "id": "q070",
+      "title": "语义改写：预订前审批",
+      "input_text": "订出差机票之前需要谁批准？",
+      "expected_output": "主管；批准",
+      "baseline_profile": "bm25",
+      "candidate_profile": "hybrid_guarded",
+      "evaluation": {
+        "relevant_ids": [
+          "701066a232922220260de79b"
+        ],
+        "keyword_groups": [
+          [
+            "主管"
+          ],
+          [
+            "批准",
+            "审批"
+          ]
+        ],
+        "source_spans": [
+          {
+            "document": "travel.md",
+            "contains": "国内出差至少提前两个工作日申请，说明目的地、日期和预算，由直属主管批准后预订行程。"
+          }
+        ]
+      },
+      "explanation": "真实 BM25 排序与 Hybrid/RRF/Cross-Encoder 的逐阶段候选、引用及延迟对比。"
+    },
+    {
+      "id": "q012",
+      "title": "技术术语：VPN / MFA",
+      "input_text": "连不上 VPN 是不是要检查账号锁定？",
+      "expected_output": "账号；多因素",
+      "baseline_profile": "bm25",
+      "candidate_profile": "hybrid_guarded",
+      "evaluation": {
+        "relevant_ids": [
+          "f6b1c50631a17324d859746c"
+        ],
+        "keyword_groups": [
+          [
+            "账号",
+            "账户"
+          ],
+          [
+            "多因素",
+            "MFA"
+          ]
+        ],
+        "source_spans": [
+          {
+            "document": "vpn-sop.md",
+            "contains": "多因素认证可用"
+          }
+        ]
+      },
+      "explanation": "真实 BM25 排序与 Hybrid/RRF/Cross-Encoder 的逐阶段候选、引用及延迟对比。"
+    },
+    {
+      "id": "multi-source",
+      "title": "跨制度多证据：远程办公与出差",
+      "input_text": "远程办公和国内出差分别需要提前多久申请，都需要谁批准？",
+      "expected_output": "一个工作日；两个工作日；直属主管",
+      "baseline_profile": "bm25",
+      "candidate_profile": "hybrid_guarded",
+      "evaluation": {
+        "relevant_ids": [
+          "89375fa8fd10c1f04df1bb7f",
+          "701066a232922220260de79b"
+        ],
+        "keyword_groups": [
+          [
+            "一个工作日",
+            "1个工作日",
+            "1 个工作日"
+          ],
+          [
+            "两个工作日",
+            "2个工作日",
+            "2 个工作日"
+          ],
+          [
+            "主管"
+          ]
+        ],
+        "source_spans": [
+          {
+            "document": "remote-work.md",
+            "contains": "至少提前一个工作日"
+          },
+          {
+            "document": "travel.md",
+            "contains": "国内出差至少提前两个工作日"
+          }
+        ]
+      },
+      "explanation": "要求命中并引用两个不同制度片段，单条相关文档不足以通过。"
+    },
+    {
+      "id": "no-answer",
+      "title": "无答案：避免相关但无依据的回答",
+      "input_text": "火星殖民的历史年份是什么？",
+      "expected_output": "现有资料不足以回答",
+      "baseline_profile": "hybrid",
+      "candidate_profile": "hybrid_guarded",
+      "evaluation": {
+        "unanswerable": true
+      },
+      "explanation": "此行专门比较 Hybrid 无门控与重排后门控，不将其伪称为纯 BM25 消融。"
+    },
+    {
+      "id": "employee-tool",
+      "title": "只读业务工具与身份边界",
+      "input_text": "查询我的员工信息",
+      "expected_output": "读取当前演示员工的信息",
+      "baseline_profile": "bm25",
+      "candidate_profile": "bm25",
+      "evaluation": {
+        "expected_tools": [
+          "employee.lookup"
+        ]
+      },
+      "explanation": "实际调用原 ToolExecutor 和隔离业务库，身份由服务端确定，不自动写工单。"
+    },
+    {
+      "id": "injected-outage",
+      "title": "明确故障注入：Dense 依赖异常 → 移除故障",
+      "input_text": "远程办公需要哪些审批？",
+      "expected_output": "直属主管",
+      "baseline_profile": "hybrid_reranker",
+      "candidate_profile": "hybrid_guarded",
+      "baseline_fault": "dense_unavailable",
+      "evaluation": {
+        "relevant_ids": [
+          "89375fa8fd10c1f04df1bb7f"
+        ],
+        "keyword_groups": [
+          [
+            "主管"
+          ]
+        ]
+      },
+      "explanation": "基线显式注入依赖不可用，修正版移除注入并重新真实执行；这不是自动自愈或真实生产故障。"
+    }
+  ]
+}

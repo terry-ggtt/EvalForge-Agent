@@ -60,3 +60,16 @@ npm --prefix frontend test
 ```
 
 Tests use Node's built-in test runner and the existing Vite loader; no additional runtime or test dependency was added.
+
+## 真实 Agent Showcase
+
+`/comparison` 已接入真实成对评测演示，侧栏名为 Agent Showcase。自动恢复最近一组明确关联的 Job；历史组可使用带 baseline/candidate 参数的 URL。Run Detail 增加来源与指标细节，Timeline 支持事件筛选与完整参数展开。
+
+完整启动与验证边界见 [Agent 接入说明](../docs/BUSINESS_AGENT_SHOWCASE.md)。
+
+
+## Adapter Studio（Stage 8）
+
+侧栏进入 `/adapter-studio`，完成 Profile、JSON 样本、显式字段披露、异步生成、Trace 预览、验证、人工审核发布和历史版本/使用查询。复用现有 UI/API/状态管理，无新增依赖。Registry Bearer 只保存在本页内存，不写浏览器存储；离开需重新连接。
+
+需先启用原 Registry 并运行独立 Registry Worker；使用数据需已有 v015 迁移。Agent HTTP 配置继续由原服务端管理。没有独立 Golden 的候选无法发布。完整流程、文件职责、部署前提和真实测试结果见 [Adapter Studio 说明](../docs/INTELLIGENT_ADAPTER_STUDIO.md)。

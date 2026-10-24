@@ -1,3 +1,4 @@
+from app.adapters.intelligent.published import evaluation_registry
 import asyncio
 import logging
 import os
@@ -408,6 +409,7 @@ async def run_worker(
             as experiment_store,
         PostgresEvaluationJobStore(database_url)
             as job_store,
+        evaluation_registry(database_url) as adapter_registry,
     ):
 
         # Initialize or validate existing schemas.
@@ -432,6 +434,7 @@ async def run_worker(
             job_store=job_store,
             experiment_service=experiment_service,
             harness_runner=harness_runner,
+            adapter_registry=adapter_registry,
         )
 
         logger.info(

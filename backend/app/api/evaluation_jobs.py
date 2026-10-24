@@ -1,5 +1,6 @@
 from fastapi import (
     APIRouter,
+    Request,
     Depends,
     Query,
     Response,
@@ -50,11 +51,20 @@ router = APIRouter(
 async def create_evaluation_job(
     body: CreateEvaluationJobRequest,
     response: Response,
+    request: Request,
     store: EvaluationJobStore = Depends(
         get_evaluation_job_store
     ),
 ) -> EvaluationJobResponse:
 
+    """Queue body as before; explicitly mapped requests additionally require trusted Registry editor identity."""
+    if body.adapter_id is not None:
+        from app.api.adapter_registry import registry_service
+        from app.registry.auth import bearer, registry_actor
+        from app.registry.models import authorize
+        actor = await registry_actor(await bearer(request))
+        authorize(actor, "editor")
+        await registry_service(request)
     payload = body.to_domain()
 
     job = await store.create(payload)

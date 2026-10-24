@@ -1,1769 +1,677 @@
-# EvalForge
+# EvalForge · Agent Evaluation Harness
 
-> Agent Evaluation & Regression Testing Platform
+### 让 Agent 的版本迭代，有可追溯的评测证据与可执行的发布标准。
 
-EvalForge 是一个面向 AI Agent 的自动化评测与回归测试平台，用于解决传统单元测试难以评估 Agent 非确定性输出的问题。
+EvalForge 是一个面向 AI Agent 的评测与回归测试平台。它将异构 Agent 的响应和执行轨迹，转换为统一的评测结果，再通过持久化任务、实验对比与质量门禁，回答三个工程问题：
 
-平台通过统一的 Agent Adapter、Dataset、Metric、Experiment、Comparison 与 Regression 模型，对不同 Agent、Prompt、Model 版本进行批量测试、指标计算和版本对比，并通过 Regression Gate 判断新版本是否出现质量退化。
+> **新版本是否更好？变化发生在哪一步？这些结论能否追溯到原始执行证据？**
+
+项目已实现从 **Agent 接入 → 异步评测 → Trace 与指标持久化 → Experiment 对比 → Regression Gate** 的后端链路，以及 **Adapter Studio：样本分析 → AI 规则生成 → 确定性预览 → 三层验证 → 人工审核发布** 的管理闭环。
+
+当前定位为具有真实数据库、独立 Worker 和前端操作界面的工程实践项目，已验证本地 / WSL 部署及独立业务 Agent 接入。生产部署仍需补齐统一身份、依赖锁定、数据保留和容量验证。
+
+[核心设计](#核心工程设计) · [系统架构](#系统架构) · [运行项目](#运行项目) · [演示路径](#建议的演示路径) · [测试证据](#测试与验证证据) · [源码导读](#源码导读)
 
 ---
 
-## Why EvalForge?
+## 先看项目已经解决了什么
 
-传统软件可以通过明确的输入与输出进行测试：
+| 工程问题 | 当前实现 | 可检查的证据 |
+| --- | --- | --- |
+| 不同 Agent 的回答、工具调用和 Trace 格式不一致 | 统一 Contracts + Adapter；可版本化的 Response / Trace Mapping | [AgentAdapter](backend/app/adapters/base.py)、[MappingSpec](backend/app/adapters/intelligent/contracts.py) |
+| 长评测不能依赖 HTTP 请求进程存活 | PostgreSQL 持久化队列、独立 Worker、Lease / Heartbeat、Case Checkpoint | [JobStore](backend/app/jobs/postgres_store.py)、[Executor](backend/app/jobs/executor.py) |
+| 改了 Prompt 或检索策略，却无法判断是否退化 | 按 Case 匹配实验，聚合指标变化，执行回归与门禁规则 | [ExperimentComparisonService](backend/app/harness/experiment_comparison_service.py)、[RegressionGate](backend/app/harness/regression_gate_service.py) |
+| AI 生成的适配规则可能结构合法、语义错误 | 严格 DSL、确定性 Runtime、拓扑检查、独立 Golden、显式人工审核 | [Validator](backend/app/adapters/intelligent/validator.py)、[Registry](backend/app/registry/postgres_store.py) |
+| 任务执行中规则被更新，影响历史结果解释 | Job 固定 adapter_id / version / digest，Worker 读取确切发布快照 | [Published Adapter](backend/app/adapters/intelligent/published.py)、[v015](backend/migrations/v015_pinned_mapping_evaluation.sql) |
+| 看到了低分，却无法区分 Agent、适配层和评测器故障 | 故障分类、未知证据保留 null、Raw / Normalized 关联、可查看的 Trace Timeline | [Runner](backend/app/harness/runner.py)、[指标语义](backend/app/harness/metric_semantics.py)、[Studio](frontend/src/pages/AdapterStudioPage.tsx) |
 
-```text
-Input
-  ↓
-Function
-  ↓
-Expected Output
+**默认 Demo 流程无需模型 API Key。** 真实业务 Agent 和 AI Mapping Generation 是显式启用的独立路径，可能产生模型调用费用。
+
+## 为什么需要这样一套系统
+
+最初可以写一个脚本，循环调用 Agent，再检查最终答案。接入更多 Agent、增加工具调用和版本比较后，会依次遇到新的问题：
+
+| 演进 | 暴露的问题 | EvalForge 的对应设计 |
+| --- | --- | --- |
+| 单次回答检查 → 多维评测 | 答案看似正确，但工具、参数、引用或成本可能有问题 | 拆分 Evaluator，将原始测量 value 与质量 score 分开 |
+| 临时脚本 → 批量实验 | 进程中断后结果丢失，难以匹配前后版本 | Run / Experiment 持久化、稳定 Case 身份、实验对比 |
+| HTTP 内执行 → 独立任务 | 请求超时、Worker 重启、并发领取和旧进程写回 | 数据库队列、Lease、Heartbeat、fencing 条件与 Checkpoint |
+| 手工 Adapter → 智能规则生成 | 每种响应都写代码成本高，模型生成又存在不确定性 | AI 在配置阶段生成 DSL，评测时执行固定规则 |
+| 可用规则 → 可发布规则 | JSON 合法无法证明业务语义正确 | 三层验证、独立 Golden、证据摘要绑定、人工审核与事务发布 |
+
+这些设计共同服务于一个目标：**一次评测的输入、执行、标准化、评分与版本判断，都有明确的数据契约和证据关联。**
+
+## 系统架构
+
+系统分为管理与生成链路、评测执行链路。两者使用独立任务表与 Worker；正式 Case 评测不调用 Mapping Agent。
+
+```mermaid
+flowchart TB
+    UI["React / TypeScript 前端"]
+    API["FastAPI"]
+    UI --> API
+
+    subgraph Studio["管理与生成链路"]
+        Samples["Profile / JSON 样本"]
+        Inspector["Schema Inspector"]
+        GQ["PostgreSQL 生成任务"]
+        GW["独立 Mapping Worker"]
+        AI["LLM 结构化生成 / 有界修复"]
+        Validator["Runtime + 三层 Validator / Golden"]
+        Review["人工审核 + 事务发布"]
+        Versions["不可变 Published Mapping Version"]
+        Samples --> Inspector --> GQ --> GW --> AI --> Validator --> Review --> Versions
+    end
+
+    subgraph Evaluation["评测执行链路"]
+        JQ["PostgreSQL Evaluation Job"]
+        EW["独立 Evaluation Worker"]
+        Runner["Executor / HarnessRunner"]
+        Adapter["Agent Adapter / 原 HTTP 调用"]
+        Agent["本地 / LangGraph / 业务 HTTP Agent"]
+        Mapping["可选：固定版本 Deterministic Mapping"]
+        Metrics["统一 AgentResult / TraceEvent → Evaluators"]
+        Evidence["Run / Trace / Raw 关联产物 / Checkpoint"]
+        Comparison["Experiment → Comparison → Regression Gate"]
+        JQ --> EW --> Runner --> Adapter --> Agent
+        Agent --> Mapping --> Metrics --> Evidence --> Comparison
+    end
+
+    API --> Samples
+    API --> JQ
+    Versions -. "显式固定版本" .-> Mapping
+    Evidence --> Replay["Replay Timeline / 证据查看"]
+    Replay --> UI
+    Comparison --> API
 ```
 
-但 Agent 的执行过程通常包含：
+- **PostgreSQL 同时承担业务持久化与任务队列**，任务领取使用 `FOR UPDATE SKIP LOCKED`；当前执行链路没有 Redis、Celery 或外部消息队列。
+- **Runner 编排生命周期，Adapter 隔离调用差异，Evaluator 计算指标**。外部框架变化不应扩散到每个评测器。
+- **Replay 读取已保存的 Trace**，不重新调用 Agent，也不按当前 Mapping 重算历史结果。
+- **Mapping Runtime 确定性只针对固定输入与规则**。真实 Agent 的模型输出、外部数据和网络仍可能变化。
 
-```text
-User Input
-    ↓
-LLM
-    ↓
-Tool Calling
-    ↓
-External Data
-    ↓
-LLM
-    ↓
-Final Answer
-```
+## 核心工程设计
 
-因此，仅判断：
+### 1. 用统一契约隔离 Agent 框架
+
+实际的 Adapter 边界是：
 
 ```python
-actual == expected
+async def run(
+    self,
+    request: AgentRequest,
+    context: RunContext,
+) -> AgentResult:
+    ...
 ```
 
-通常无法准确衡量 Agent 的真实质量。
+| 契约 | 职责 |
+| --- | --- |
+| TestCase | 数据集身份、输入、期望输出、期望工具调用、案例元数据 |
+| AgentRequest | 发送给 Adapter 的输入和元数据 |
+| AgentResult | 统一 output_text、trace、metadata |
+| TraceEvent | 统一事件类型、时间戳和 payload |
+| RunContext | 单次执行的 run_id、TraceCollector、计时和隔离的元数据 |
+| MetricResult | 指标名、原始测量值、单位、可选质量分和解释明细 |
+| CaseResult | 完整案例档案：实际输出、指标、Trace、错误与故障类别 |
 
-Agent 评测需要同时关注：
+TestCase 的参考答案留在评测侧；Runner 不将 expected_output 作为 AgentRequest 的标准字段发送给 Agent。案例元数据仍需调用方合理管理，不能主动放入答案等泄漏信息。
 
-- 最终回答质量
-- Tool 选择是否正确
-- Tool Arguments 是否正确
-- 执行过程是否稳定
-- Latency
-- Token / Cost
-- Citation
-- 不同版本之间是否出现 Regression
+当前存在 LocalAgentAdapter、LangGraphAdapter、TracingDemoAdapter 和 BusinessHttpAdapter。发布 Mapping 的正式集成针对 **BusinessHttpAdapter 的响应标准化边界**，保留原 HTTP 请求体、认证和调用逻辑；它不自动发现任意第三方协议。
 
-EvalForge 的目标就是提供一套统一的 Agent Evaluation Harness。
+源码：[Contracts](backend/app/harness/contracts.py) · [RunContext](backend/app/harness/context.py) · [Adapters](backend/app/adapters)
 
----
+### 2. 将“完成任务”和“质量通过”分开
 
-# Core Workflow
-
-整体评测流程：
+Evaluation Job 是持久化状态机：
 
 ```text
-Dataset
-   ↓
-Normalizer
-   ↓
-TestCase
-   ↓
-Agent Adapter
-   ↓
-Evaluation Runner
-   ↓
-Run Result
-   ↓
-Metrics
-   ↓
-Experiment
-   ↓
-Comparison
-   ↓
-Regression Detection
-   ↓
-Gate Decision
+queued → running → completed / failed
+   │         │
+   │         ├─ 用户请求取消 → cancel_requested → cancelled / completed / failed
+   │         └─ Lease 过期 → 有界恢复 queued，或达到上限后 failed
+   └─ 执行前取消 → cancelled
 ```
 
-版本对比流程：
+**Job completed 表示案例处理完毕，可能包含 failed_cases；质量是否通过由指标和 Gate 决定。**
+
+| 机制 | 解决的问题 | 实际保证范围 |
+| --- | --- | --- |
+| 原子领取 + SKIP LOCKED | 多 Worker 争抢同一任务 | 一个领取事务获得当前执行权 |
+| 独立 Heartbeat | 长 Case 执行时租约过期 | 持续续租；续租失败后不能假设仍拥有任务 |
+| worker_id + attempt_count + 有效 Lease 写入条件 | 旧 Worker 覆盖任务归属或进度 | 拒绝过期所有者更新 Job / Checkpoint |
+| Case Checkpoint | 重启后重复执行已经完成的案例 | 恢复已提交案例的 Run 引用并跳过已完成 Case |
+| Run 与 Raw 关联产物同事务保存 | 有规范结果却丢失原始证据 | 已提交 Run 与其私有产物一致落库 |
+
+单个 Worker 进程一次执行一个 Job；可运行多个 Worker。Runner 另有 Case 并发与超时策略。**Job 执行尝试与 Agent 的 Case 内重试是两层不同机制。**
+
+Run 与关联产物的事务、Case Checkpoint 与进度的事务是两个提交边界。Run 已保存但 Checkpoint 未提交时，可能留下未关联 Run；任务归属与恢复依据已提交的 Checkpoint。
+
+Checkpoint 不等于外部调用 exactly-once：Agent 已执行但 Case 尚未提交时，恢复可能重新发起请求。同步阻塞调用或不合作的协程也不具备进程级强制超时保证。
+
+源码：[Worker](backend/app/worker.py) · [Executor](backend/app/jobs/executor.py) · [JobStore](backend/app/jobs/postgres_store.py)
+
+### 3. AI 只生成候选，运行时只解释受限 DSL
+
+Intelligent Adapter System 的实际闭环：
 
 ```text
-Baseline Experiment
-        +
-Candidate Experiment
-        ↓
-Case Comparison
-        ↓
-Metric Comparison
-        ↓
-Experiment Comparison
-        ↓
-Regression Report
-        ↓
-PASS / FAIL
+多个原始样本
+  → Schema Inspector：路径 / 类型 / 出现频率 / nullable / 结构差异 / 指纹
+  → 人工选择字段与必要标量披露
+  → Mini Mapping Agent：结构化 MappingSpec + 来源证据与不确定性
+  → 确定性 Runtime + Validator
+  → 有界修复，默认首次生成后最多修复 3 次
+  → Candidate / needs_manual_review
+  → 独立人工审核与发布
+  → Job 固定版本，逐 Case 执行确定性 Mapping
 ```
 
----
+关键约束：
 
-# Features
+- DSL 支持 `extract`、`rename`、`enum_map`、`cast`、`coalesce`、`sum_if_present`，使用严格 Pydantic 契约，可序列化为 JSONB。
+- JSONPath 限制为根、对象字段和非负数组索引，支持 JSON 引号键；不支持过滤表达式、切片或任意代码。
+- 明确区分字段不存在、显式 null、类型不符和转换失败；不修改原始输入，不补造 Span、时间或 Token。
+- Inspector 的数组归一化路径用于结构描述；它的 `[]` 不能直接当作 Runtime 的可执行通配符。
+- 模型上下文使用显式披露白名单；Raw 与 Golden 不整体发给模型。样本和字段说明作为不可信数据处理。
+- 超时、调用失败、格式错误和预算消耗均有终止条件；没有无限修复或自动发布。
+- 不执行模型生成的 Python，不提供 eval / exec / 动态代码导入执行通道。
 
-## 1. Unified Agent Adapter
-
-EvalForge 不依赖具体 Agent 框架。
-
-所有 Agent 只需要实现统一接口：
-
-```python
-from abc import ABC, abstractmethod
-
-
-class BaseAgent(ABC):
-
-    @abstractmethod
-    async def run(
-        self,
-        input_text: str,
-    ) -> dict:
-        ...
-```
-
-因此可以接入：
-
-```text
-Local Agent
-Remote Agent
-Research Agent
-RAG Agent
-LangChain Agent
-LangGraph Agent
-Custom Agent
-```
-
-Harness 不关心 Agent 内部实现，只负责：
-
-```text
-Input
-  ↓
-Agent
-  ↓
-Result
-  ↓
-Evaluation
-```
-
----
-
-## 2. Dataset Normalization
-
-不同测试数据集通常具有不同字段：
+例如，供应商将答案写在 answer，并将 Span 信息嵌入事件的 span 对象。可以将它映射回已有 AgentResult / TraceEvent，无需再造一套规范结果模型：
 
 ```json
 {
-  "question": "...",
-  "answer": "..."
-}
-```
-
-或者：
-
-```json
-{
-  "query": "...",
-  "expected": "..."
-}
-```
-
-EvalForge 通过 `FieldMapping` 与 `CaseNormalizer` 将不同数据格式统一转换为标准 `TestCase`。
-
-```text
-Raw Dataset
-    ↓
-Field Mapping
-    ↓
-Normalizer
-    ↓
-TestCase
-```
-
-标准结构示例：
-
-```json
-{
-  "id": "case_001",
-  "input_text": "What is RAG?",
-  "expected_output": "...",
-  "expected_tool_calls": [],
-  "metadata": {}
-}
-```
-
-这样 Evaluator 不需要感知原始 Dataset 的具体格式。
-
----
-
-# 3. Evaluation Runner
-
-Evaluation Runner 是 Harness 的核心执行器。
-
-主要负责：
-
-```text
-TestCase
-   ↓
-Agent.run()
-   ↓
-Trace Collection
-   ↓
-Metric Calculation
-   ↓
-RunResult
-```
-
-支持：
-
-- Async Agent Execution
-- Batch Evaluation
-- Error Handling
-- Trace Collection
-- Metric Evaluation
-- Run Result Storage
-
----
-
-# 4. Metrics
-
-EvalForge 支持针对不同维度进行评测。
-
-例如：
-
-```text
-Answer Quality
-Tool Accuracy
-Tool Arguments
-Latency
-Token Usage
-Citation Accuracy
-Citation Coverage
-```
-
-Metric 与 Runner 解耦，可以独立扩展新的指标。
-
-概念结构：
-
-```python
-Metric
-  │
-  ├── AnswerMetric
-  ├── ToolMetric
-  ├── LatencyMetric
-  └── CustomMetric
-```
-
-后续可扩展：
-
-```text
-LLM-as-a-Judge
-Correctness
-Relevance
-Completeness
-Faithfulness
-Recall@K
-MRR
-Cost
-```
-
----
-
-# 5. Experiment
-
-单次 Run 无法代表一个 Agent 版本的整体能力。
-
-因此 EvalForge 引入 Experiment：
-
-```text
-Experiment
-│
-├── Agent Version
-├── Dataset
-├── Test Cases
-├── Runs
-├── Metrics
-└── Metadata
-```
-
-例如：
-
-```text
-experiment_agent_v1
-
-dataset:
-customer-support-v1
-
-agent:
-agent-v1
-
-cases:
-100
-
-answer_quality:
-0.82
-
-tool_accuracy:
-0.91
-
-latency:
-1.42s
-```
-
-Experiment 将大量 Case Run 聚合成一个完整的测试结果。
-
----
-
-# 6. Experiment Comparison
-
-EvalForge 支持 Baseline / Candidate 实验对比。
-
-例如：
-
-```text
-Baseline
-agent-v1
-
-Candidate
-agent-v2
-```
-
-系统会自动匹配相同 Case：
-
-```text
-case_001
-baseline: 0.80
-candidate: 0.88
-
-delta:
-+0.08
-```
-
-随后进行整体指标聚合：
-
-```text
-                    Baseline   Candidate   Delta
-
-Answer Quality        0.81       0.86      +0.05
-
-Tool Accuracy         0.92       0.89      -0.03
-
-Latency               1.20       1.48      +0.28
-```
-
-从而回答一个核心问题：
-
-> 新版本 Agent 是否真的优于旧版本？
-
----
-
-# 7. Regression Detection
-
-仅展示 Delta 并不能自动判断版本是否可以发布。
-
-因此 EvalForge 引入 Regression Rule。
-
-例如：
-
-```text
-Answer Quality
-
-允许下降：
-2%
-```
-
-如果：
-
-```text
-baseline = 0.85
-candidate = 0.78
-```
-
-则：
-
-```text
-delta = -0.07
-```
-
-触发 Regression：
-
-```text
-REGRESSION DETECTED
-```
-
----
-
-# 8. Quality Gate
-
-通过 `MetricGateRule` 可以为不同指标配置独立阈值：
-
-```text
-answer_quality >= -0.02
-
-tool_accuracy >= -0.03
-
-latency <= +20%
-```
-
-最终生成 Gate Result：
-
-```text
-PASS
-```
-
-或者：
-
-```text
-FAIL
-```
-
-例如：
-
-```text
-Agent V2 Evaluation
-
-Answer Quality
-+4.2%    PASS
-
-Tool Accuracy
--7.1%    FAIL
-
-Latency
-+8.4%    PASS
-
-----------------
-
-Final Gate
-
-FAIL
-```
-
-这使 EvalForge 可以进一步接入 CI/CD。
-
----
-
-# 9. Trace & Observability
-
-Agent 的最终 Answer 只是执行结果的一部分。
-
-为了定位 Agent 为什么失败，需要记录完整执行过程。
-
-EvalForge 使用 Trace Event 描述运行轨迹：
-
-```text
-agent.start
-
-llm.start
-llm.end
-
-tool.start
-tool.end
-
-retry
-
-error
-
-agent.end
-```
-
-例如：
-
-```text
-0 ms       agent.start
-
-120 ms     llm.start
-
-840 ms     llm.end
-
-860 ms     tool.search.start
-
-1320 ms    tool.search.end
-
-1340 ms    llm.start
-
-2150 ms    llm.end
-
-2180 ms    agent.end
-```
-
-可以进一步统计：
-
-```text
-LLM Latency
-Tool Latency
-Tool Calls
-Retry Count
-Errors
-Token Usage
-```
-
----
-
-# Architecture
-
-```text
-                     ┌───────────────┐
-                     │   Frontend    │
-                     │ React + TS    │
-                     └───────┬───────┘
-                             │
-                             ▼
-                     ┌───────────────┐
-                     │    FastAPI    │
-                     │  API Server   │
-                     └───────┬───────┘
-                             │
-               ┌─────────────┼─────────────┐
-               │             │             │
-               ▼             ▼             ▼
-
-          PostgreSQL       Redis       Job Queue
-               │             │             │
-               │             └──────┬──────┘
-               │                    │
-               │                    ▼
-               │            Evaluation Worker
-               │                    │
-               │                    ▼
-               │               Agent Adapter
-               │                    │
-               │                    ▼
-               │                  Agent
-               │
-               ▼
-
-        Dataset / Experiment
-        Run / Metric
-        Comparison
-        Regression
-        Trace
-```
-
----
-
-# Project Structure
-
-```text
-agent-evaluation-harness/
-│
-├── backend/
-│   └── app/
-│       │
-│       ├── main.py
-│       │
-│       ├── database.py
-│       │
-│       ├── models.py
-│       │
-│       ├── api/
-│       │   ├── datasets.py
-│       │   ├── evaluation.py
-│       │   ├── experiments.py
-│       │   └── comparisons.py
-│       │
-│       ├── agent/
-│       │   ├── base.py
-│       │   └── demo_agent.py
-│       │
-│       ├── datasets/
-│       │   ├── base.py
-│       │   └── mapping.py
-│       │
-│       ├── evaluator/
-│       │   ├── runner.py
-│       │   └── metrics.py
-│       │
-│       ├── harness/
-│       │   ├── contracts.py
-│       │   ├── comparison.py
-│       │   ├── regression.py
-│       │   └── trace.py
-│       │
-│       └── storage/
-│           └── run_store.py
-│
-├── frontend/
-│
-├── tests/
-│
-├── requirements.txt
-│
-└── README.md
-```
-
-> 实际目录以当前代码版本为准。
-
----
-
-# Quick Start
-
-以下命令适用于当前 Ubuntu / WSL 项目，前端实际目录为 `frontend/`。完整启动需要三个终端：API 接收请求，Worker 执行异步评测，前端展示任务和结果。
-
-```text
-浏览器（localhost:5173）
-  → FastAPI（127.0.0.1:8013）
-  → PostgreSQL Job Queue
-  → 独立 Worker
-  → Experiment / Run / Trace
-```
-
-## 1. 启动前准备
-
-- PostgreSQL 已运行，且已有 Run / Experiment 表和 Evaluation Job 迁移已就绪。
-- `backend/.env` 中配置有效的 `HARNESS_DATABASE_URL`；不要将数据库凭据提交到仓库。
-- 使用现有 `backend/.venv` Python 环境。
-- 前端使用 Node 22.13+（已在 22.23.3 验证）；系统 Node 18 无法运行当前 Vite 8。
-- 前端依赖已安装；首次安装可在仓库根目录执行 `npm --prefix frontend ci`，执行前先切换到 Node 22。
-
-## 2. 终端一：启动后端 API
-
-```bash
-cd /home/terry/projects/agent-evaluation-harness/backend
-.venv/bin/python -m uvicorn app.main:app --env-file .env --host 0.0.0.0 --port 8013
-```
-
-查看 API：
-
-- 健康检查：<http://127.0.0.1:8013/health>
-- Swagger 文档：<http://127.0.0.1:8013/docs>
-
-本地使用 `8013` 避免 Windows 上已有 `8000` 服务冲突。若改用其他端口，需要同步修改前端的 `VITE_API_BASE_URL`。
-
-## 3. 终端二：启动评测 Worker
-
-```bash
-cd /home/terry/projects/agent-evaluation-harness/backend
-.venv/bin/python -m app.worker
-```
-
-Worker 会读取 `backend/.env`。API 与 Worker 必须连接同一个数据库。只启动 API 和前端时可以创建任务，但排队任务需要 Worker 才能执行。
-
-## 4. 终端三：启动前端
-
-```bash
-cd /home/terry/projects/agent-evaluation-harness
-nvm use 22
-VITE_API_BASE_URL=http://127.0.0.1:8013 npm --prefix frontend run dev -- --host 0.0.0.0 --port 5173 --strictPort
-```
-
-`--strictPort` 可避免 5173 被占用时 Vite 自动切到另一个端口，导致前端来源与后端 CORS 配置不一致。若端口被占用，请先确认已有服务，再决定停止旧实例或复用它。
-
-在 Windows 浏览器中使用以下地址：
-
-- Evaluation Jobs：<http://localhost:5173/evaluation-jobs>
-- Experiments：<http://localhost:5173/experiments>
-- Runs：<http://localhost:5173/runs>
-
-也可以使用 `http://127.0.0.1:5173`。`--host 0.0.0.0` 是监听配置，浏览器地址请使用 `localhost` 或 `127.0.0.1`。
-
-## 5. 加载失败与 CORS 排查
-
-当前后端 `backend/app/main.py` 中的 CORS 只允许：
-
-```text
-http://localhost:5173
-http://127.0.0.1:5173
-```
-
-如果使用 Vite 输出的 WSL Network 地址（例如 `http://172.17.3.158:5173`）打开前端，浏览器请求来源不在允许列表中。后端会返回：
-
-```text
-OPTIONS /health                         400 Bad Request
-OPTIONS /experiments?limit=100           400 Bad Request
-OPTIONS /evaluation-jobs?...             400 Bad Request
-Disallowed CORS origin
-```
-
-此时界面可能显示 `Failed to load experiments` 或 `Unable to connect to the API`。这是跨域预检被拒绝，不代表数据库没有数据。
-
-处理顺序：
-
-1. 将浏览器地址改为 <http://localhost:5173/evaluation-jobs>，刷新后重试；如果仅访问地址不对，无需重启服务。
-2. 确认前端实际端口为 `5173`，并且启动时设置的 `VITE_API_BASE_URL` 与真实 API 端口一致。前端未设置该变量时默认请求 `http://127.0.0.1:8000`。
-3. 修改 `VITE_API_BASE_URL` 后需要重新启动 Vite；仅刷新浏览器不会更改已启动进程的环境变量。
-4. 如确需通过其他 IP / 域名访问，应在后端 `allow_origins` 中显式加入对应的完整来源（协议、主机、端口），再重启 API。WSL IP 可能变化；本机开发优先使用 `localhost`。
-
-检查允许来源的预检请求：
-
-```bash
-curl -i -X OPTIONS 'http://127.0.0.1:8013/evaluation-jobs?limit=20&offset=0' \
-  -H 'Origin: http://localhost:5173' \
-  -H 'Access-Control-Request-Method: GET' \
-  -H 'Access-Control-Request-Headers: content-type'
-```
-
-正常应返回 `200 OK` 和 `access-control-allow-origin: http://localhost:5173`。直接调用 GET 接口成功，也仍需检查浏览器来源对应的 OPTIONS 预检。
-
-前端验证命令（仓库根目录，使用 Node 22）：
-
-```bash
-npm --prefix frontend run typecheck
-npm --prefix frontend run build
-npm --prefix frontend run lint
-npm --prefix frontend test
-```
-
-更多前端页面、表单和轮询说明见 [frontend/README.md](frontend/README.md)。
-
----
-
-# Example
-
-假设存在一个 Demo Agent：
-
-```python
-class DemoAgent(BaseAgent):
-
-    async def run(
-        self,
-        input_text: str,
-    ) -> dict:
-
-        return {
-            "answer":
-                f"Demo Agent response: {input_text}"
-        }
-```
-
-输入 TestCase：
-
-```json
-{
-  "id": "case_001",
-  "input_text": "Explain RAG",
-  "expected_output": "RAG combines retrieval with generation."
-}
-```
-
-Runner：
-
-```text
-TestCase
-   ↓
-DemoAgent
-   ↓
-RunResult
-   ↓
-Metric
-```
-
-生成类似：
-
-```json
-{
-  "run_id": "run_001",
-  "status": "completed",
-  "metrics": {
-    "answer_quality": 0.85,
-    "latency": 0.21
+  "spec_version": "1.0",
+  "name": "vendor-response-v1",
+  "response": {
+    "fields": [
+      {
+        "target": "$.output_text",
+        "operation": { "op": "extract", "path": "$.answer" },
+        "value_type": "string",
+        "on_missing": "error",
+        "on_null": "error"
+      }
+    ]
+  },
+  "trace": {
+    "events_path": "$.events",
+    "type_path": "$.kind",
+    "on_unknown_event": "error",
+    "rules": [
+      {
+        "source_type": "model",
+        "event_type": "model_result",
+        "fields": [
+          {
+            "target": "$.timestamp",
+            "operation": { "op": "extract", "path": "$.finished" },
+            "value_type": "datetime",
+            "on_missing": "error",
+            "on_null": "error"
+          },
+          {
+            "target": "$.payload",
+            "operation": { "op": "extract", "path": "$.span" },
+            "value_type": "object",
+            "on_missing": "error",
+            "on_null": "error"
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-多个 Run 最终组成：
+Response 路径相对完整响应；type_path 和事件字段路径相对单个事件。上述规则要求真实的带时区 finished 时间以及 span 对象；缺失时返回错误，不用当前时间补齐。这份规则是否正确表达业务语义，还必须由独立 Golden 验证。
+
+源码：[DSL](backend/app/adapters/intelligent/contracts.py) · [Runtime](backend/app/adapters/intelligent/runtime.py) · [Inspector](backend/app/adapters/intelligent/inspector.py) · [生成服务](backend/app/adapters/intelligent/generation_service.py)
+
+### 4. 把“合法配置”和“可信规则”分成三层验证
+
+| 层次 | 检查内容 | 不能据此推断的结论 |
+| --- | --- | --- |
+| L1：结构 | MappingSpec / 输出契约、类型、枚举、时间格式、重复 Span ID | 字段含义一定正确 |
+| L2：拓扑 | 父 Span 引用、父子环、明显时间矛盾；允许合法并发 | Trace 已完整覆盖业务过程 |
+| L3：语义 / Golden | 人工定义的期望输出、Span Type、Token Usage、Tool Call 等关键字段 | 对未见数据普遍正确 |
+
+当前拓扑检查按配置路径将一个映射事件解释为一条 Span 记录；原始 start/end 分散在多个事件时，不会自动合并，也不会补造缺失关系或时间。
+
+ValidationReport 分开输出 **error / warning / unverified** 和可执行的发布阻断原因。Partial Trace 的未知信息必须保留；没有独立 Golden 时，L3 不能宣称通过。Golden 来自人工期望，而非从当前预览反向复制。
+
+发布时在一个 PostgreSQL 事务内锁定 Profile 和 Candidate，重新核对最新报告、样本/配置/规则摘要和人工审核记录，然后插入版本、递增版本计数并写审计。数据库唯一约束兜底并发；同一候选和审核的发布重试返回同一版本。
+
+Published Version 及关键证据通过触发器禁止修改/删除/清空；应用代码不能覆盖已发布规则。数据库所有者能够修改 DDL，因此该保证以合理的部署权限为前提。
+
+源码：[Validator](backend/app/adapters/intelligent/validator.py) · [Registry 发布事务](backend/app/registry/postgres_store.py) · [v014 约束](backend/migrations/v014_adapter_registry.sql)
+
+### 5. 固定规则版本，保留完整证据关联
 
 ```text
-Experiment
-```
-
-并可以进一步：
-
-```text
-Experiment A
-     VS
-Experiment B
-```
-
-执行 Regression Analysis。
-
----
-
-# API Design
-
-主要 API 规划：
-
-```text
-POST   /datasets
-GET    /datasets
-
-POST   /evaluations
-
-POST   /experiments
-GET    /experiments
-GET    /experiments/{id}
-
-POST   /comparisons
-GET    /comparisons/{id}
-
-POST   /evaluation-jobs
-GET    /evaluation-jobs/{id}
-POST   /evaluation-jobs/{id}/cancel
-```
-
-具体接口以当前版本 OpenAPI 文档为准。
-
----
-
-# Roadmap
-
-## V0.1 - V0.10
-
-基础 Harness：
-
-```text
-Agent Adapter
-TestCase
-Dataset Normalization
-Runner
-Metrics
-Trace
-RunStore
-```
-
-## V0.11
-
-Experiment：
-
-```text
-Experiment
-Experiment Run
-Metric Aggregation
-```
-
-## V0.12
-
-Regression：
-
-```text
-Case Comparison
-Metric Comparison
-Experiment Comparison
-Regression Detection
-Metric Gate
-```
-
-## V0.13
-
-Async Evaluation Job：
-
-```text
-Job State Machine
-Concurrency
-Progress
-Cancellation
-```
-
-## V0.14
-
-Persistent Runtime：
-
-```text
-PostgreSQL
-Redis
-Worker
-Failure Recovery
-```
-
-## V0.15
-
-Observability：
-
-```text
-Trace Timeline
-LLM Trace
-Tool Trace
-Latency
-Token Usage
-Error Tracking
-```
-
-## V0.16
-
-Dataset Management：
-
-```text
-Dataset Version
-Benchmark
-Tags
-Filtering
-```
-
-## V0.17
-
-Advanced Evaluation：
-
-```text
-LLM-as-a-Judge
-Correctness
-Relevance
-Completeness
-Faithfulness
-Citation Evaluation
-```
-
-## V0.18
-
-Experiment Management：
-
-```text
-Agent Version
-Prompt Version
-Model Config
-Experiment Tracking
-```
-
-## V0.19
-
-CI/CD：
-
-```text
-GitHub Actions
-Regression Dataset
-Quality Gate
-PR Blocking
-```
-
-## V1.0
-
-目标形成完整的：
-
-```text
-Agent Evaluation Platform
-
-Dataset
-   ↓
-Evaluation
-   ↓
-Experiment
-   ↓
-Comparison
-   ↓
-Regression
-   ↓
-Gate
-   ↓
-Observability
-   ↓
-CI/CD
-```
-
----
-
-# Design Principles
-
-EvalForge 主要遵循以下设计原则：
-
-### Framework Agnostic
-
-Harness 不依赖具体 Agent Framework。
-
-```text
-LangGraph
-LangChain
-Custom Agent
-Remote Agent
-```
-
-都可以通过 Adapter 接入。
-
-### Evaluation First
-
-平台重点不是运行 Agent，而是：
-
-```text
-Measure
-Compare
-Detect
-Decide
-```
-
-### Reproducible Experiments
-
-每次实验应尽可能记录：
-
-```text
-Agent Version
-Dataset Version
-Prompt
-Model
-Config
-Metrics
-Trace
-```
-
-便于结果复现和版本比较。
-
-### Extensible
-
-Agent、Dataset、Metric、Storage 与 Runner 尽量通过抽象接口解耦。
-
-新增能力不应修改 Harness 核心执行流程。
-
----
-
-# Vision
-
-传统软件已经拥有成熟的：
-
-```text
-Unit Test
-Integration Test
-Regression Test
-CI/CD
-```
-
-但 Agent 系统具有：
-
-```text
-Non-deterministic Output
-Tool Calling
-LLM Dependency
-External Environment
-Semantic Quality
-```
-
-因此需要新的测试基础设施。
-
-EvalForge 希望将传统软件工程中的：
-
-```text
-Test
-Benchmark
-Regression
-Quality Gate
-Observability
-```
-
-扩展到 Agent 系统中，让 Agent 的每一次版本迭代都可以：
-
-```text
-被运行
-被测量
-被比较
-被追踪
-被验证
-```
-0.1版本项目框架思考：
-我要做的是一个 Agent Evaluation Harness。
-
-既然目标是评估 Agent，那么首先一定要有评估器，也就是 Evaluator。Evaluator 负责从不同维度对 Agent 的执行结果进行评分，比如答案质量、工具调用准确率、延迟、成本、轨迹质量等。
-
-但是马上会遇到第二个问题：不同 Agent 的实现方式和底层框架并不一样。
-
-有的 Agent 可能基于 LangGraph，有的可能基于 Pi，有的可能只是自己写的 Python Agent，甚至还有可能是一个远程 HTTP Agent。它们的输入格式、输出格式、状态结构、Tool Calling 格式都可能完全不同。
-
-如果 Harness 直接依赖这些具体 Agent 的实现，那么每接入一种新框架，就需要修改 Harness 本身，这样 Harness 就失去了通用性。
-
-所以我们需要增加一层 Adapter，也就是适配器。
-
-Adapter 的作用并不是要求外部 Agent 遵循 Harness 的协议，而是反过来，由 Adapter 去适配不同 Agent 的原生接口。
-
-也就是说：
-
-```text
-Harness 的统一格式
+Evaluation Job.payload_json
+  └─ adapter_id + adapter_version + 服务端解析的 mapping_digest
+        ↓ Worker 按执行尝试加载确切已发布快照
+Business HTTP 原调用
         ↓
-      Adapter
+Raw Response → Deterministic Mapping → AgentResult / TraceEvent
         ↓
-不同 Agent 自己的原生格式
+harness_runs：案例结果、标准化 Trace、公开关联 ID
+harness_mapping_artifacts：Raw 文本/字节、MappingResult、NormalizedResult
+        ↓
+Case Checkpoint → Experiment → Replay / Comparison / Gate
 ```
 
-这样 Harness 本身就不需要关心底层到底是 LangGraph、Pi、HTTP Agent 还是普通 Python Agent。
+Job 执行中发布新版本，不会改变当前绑定；Worker 恢复也使用同一绑定。RunContext 的 run_id 标识执行，Case ID 标识数据集案例，attempt_id 标识 Case 内尝试，三者分工明确。
 
-但这时候又产生一个新的问题：
+原始事件通过 Runtime 的 raw_pointer 与标准化事件关联，保留映射过程。受保护的 Raw 查询要求 Registry editor 权限；公开 Run 元数据不携带整份原始响应。
 
-Harness、Adapter、Evaluator 之间到底如何交换信息？
+源码：[PublishedBusinessHttpAdapter](backend/app/adapters/intelligent/published.py) · [v015 固定绑定与产物](backend/migrations/v015_pinned_mapping_evaluation.sql)
 
-如果它们之间全部直接传 `dict`，那么很快就会出现：
+### 6. 故障隔离和指标语义一致，比一个总分更重要
 
-```text
-输入字段叫什么？
-输出字段叫什么？
-trace 放在哪里？
-metadata 放在哪里？
-Evaluator 返回什么结构？
-```
+启用已发布 Mapping 的链路区分：
 
-如果没有统一约定，系统内部很快就会变得混乱。
+| failure_kind | 含义 | 质量解释 |
+| --- | --- | --- |
+| agent_execution | Agent 调用或业务执行失败 | 执行故障，不能直接解释为回答质量差 |
+| mapping | 原始响应无法可靠标准化 | 停止该案例评分，保留原始证据 |
+| evaluation | 评测器计算失败 | 评测流水线故障，不能生成可信质量结论 |
 
-所以我们需要设计一层统一协议，也就是 `contracts`。
+这些流水线失败使用 `score=null`，不以零分混入 Agent 质量。该语义属于新的发布 Mapping 路径，未启用的历史流程保留兼容行为。
 
-`contracts` 的作用就是定义 Harness 内部不同模块之间统一的数据结构。
+未知 Token / 成本保留 unverified / null；Token、工具指标读取最后成功 Attempt 的 Agent 证据，Latency 保留 Harness 生命周期范围。计量型指标没有质量 score 时，不参与质量分平均。
 
-首先是 `TraceEvent`。
+Comparison / Regression / Gate 复用 `harness-normalized/v1` 语义检查：拒绝将未知质量、流水线失败或混合的历史/新规范静默比较。固定规则版本提供可追溯性；可比性仍依赖相同案例、数据集约束和一致指标定义。
 
-一开始容易把 Trace 理解成“Harness 要做什么”，但更准确地说，Trace 并不是用来控制 Harness 执行的，而是用来记录：
+源码：[EvidenceAwareEvaluator](backend/app/adapters/intelligent/published.py) · [metric_semantics](backend/app/harness/metric_semantics.py)
 
-> Agent 和 Harness 执行过程中发生了什么。
+## 指标与质量门禁
 
-比如一次 Agent 执行过程中可能发生：
+评测器可组合，Runner 的具体指标由配置选择，并非每次运行自动启用所有指标。
 
-```text
-agent_start
-↓
-model_call
-↓
-model_result
-↓
-tool_call
-↓
-tool_result
-↓
-model_call
-↓
-agent_end
-```
+| 维度 | 当前实现 | 解释边界 |
+| --- | --- | --- |
+| 回答匹配 | KeywordMatchEvaluator | 关键词覆盖，不等同于语义正确性判定 |
+| 工具调用 | ToolAccuracyEvaluator / ToolEfficiencyEvaluator / 参数匹配器 | 根据期望工具、参数和执行证据判断 |
+| 时延 | LatencyEvaluator | 基于已有生命周期证据测量 |
+| Token / 费用 | TokenUsageEvaluator / CostEvaluator / PricingCatalog | 依赖实际 usage 与已配置价格，价格目录不是实时账单 |
+| 检索效果 | 业务 RAG 的 Recall@5 / MRR@5 | 依赖人工参考来源标注 |
+| 引用 | citation_recall / citation_grounding | 来源 ID 覆盖与精度，不证明逐句语义蕴含 |
+| 无答案行为 | abstention | 演示策略联合检查空检索、空引用与明确拒答 |
 
-所以 Trace 更像是 Agent 执行过程中的“黑匣子”。
+Regression Gate 支持案例回归率、平均质量分变化、缺失案例数量，以及指标级绝对/相对变化约束。例如：
 
-为了限制 Trace 中允许出现哪些事件，我们定义 `TraceEventType`。
-
-例如：
-
-```text
-agent_start
-agent_end
-model_call
-model_result
-tool_call
-tool_result
-error
-```
-
-它的作用不是决定 Harness 应该执行什么，而是定义：
-
-> Harness 能识别和记录哪些标准事件类型。
-
-每一个 TraceEvent 除了事件类型之外，还需要记录事件发生时的一些附属信息。
-
-例如 `tool_call` 可能需要记录：
-
-```text
-tool_name
-arguments
-```
-
-而 `model_call` 可能需要记录：
-
-```text
-model
-messages
-tokens
-```
-
-不同事件携带的信息是不一样的，所以不能把所有字段全部写死。
-
-因此 TraceEvent 中增加一个：
-
-```python
-payload: dict
-```
-
-用于保存不同事件对应的动态数据。
-
-这样就形成了统一结构：
-
-```text
-TraceEvent
-├── type
-├── timestamp
-└── payload
-```
-
-接下来要思考的是：
-
-Harness 如何向 Adapter 发起一次 Agent 执行？
-
-所以我们定义 `AgentRequest`。
-
-最基本的信息肯定是用户输入，因此需要：
-
-```text
-input_text
-```
-
-但是一次 Agent 执行通常不只有文本输入。
-
-还可能有：
-
-```text
-thread_id
-conversation_id
-user_id
-task_id
-timeout
-tags
-```
-
-而不同 Agent 使用的附属字段又可能不一样，所以这里同样不适合全部写死。
-
-因此增加：
-
-```python
-metadata: dict
-```
-
-于是 AgentRequest 可以理解为：
-
-> Harness 向 Adapter 发起一次标准 Agent 执行请求时使用的数据结构。
-
-注意，这并不意味着外部 Agent 必须接受 AgentRequest。
-
-真正的关系应该是：
-
-```text
-AgentRequest
-    ↓
-Adapter
-    ↓
-转换成 Agent 自己需要的格式
-```
-
-比如 LangGraphAdapter 可能把：
-
-```text
-input_text
-```
-
-转换成：
-
-```text
-messages
-state
-config
-```
-
-PiAdapter 又可能转换成另外一种格式。
-
-所以 Adapter 本质上承担的是“协议转换”的职责。
-
-当 Adapter 调用外部 Agent 后，会得到一个 `raw_result`。
-
-但不同 Agent 的返回结果同样可能完全不同。
-
-有的可能返回：
-
-```python
+```json
 {
-    "answer": "..."
+  "baseline_experiment_id": "<baseline-experiment-id>",
+  "candidate_experiment_id": "<candidate-experiment-id>",
+  "require_same_dataset_version": true,
+  "policy": {
+    "max_regression_rate": 0.05,
+    "min_average_score_delta": -0.02,
+    "max_missing_case_count": 0,
+    "metric_rules": [
+      {
+        "name": "keyword-score-regression",
+        "metric_name": "keyword_match",
+        "target": "score_delta_mean",
+        "operator": "gte",
+        "threshold": -0.02
+      }
+    ]
+  }
 }
 ```
 
-有的可能返回：
+将该请求提交至 `POST /gates/evaluate`。结果给出 passed / failed 和逐规则 finding，保留可评估性、实际值、阈值及原因。Gate 已有后端接口；将其接入 CI 的退出码或 PR 阻断仍需集成工作。
 
-```python
-{
-    "messages": [...]
-}
+## Adapter Studio
+
+入口：`/adapter-studio`。页面沿用现有 React 组件风格、API Client 和 TanStack Query，不增加大型 UI 框架。
+
+| 操作 | 页面提供的证据与保护 |
+| --- | --- |
+| 创建 Profile，上传/输入 JSON 样本 | 不可变样本批次，可携带人工独立 Golden |
+| 查看 Inspector 字段 | 路径、类型、频率、nullable、缺失次数、跨样本差异与指纹 |
+| 生成候选 | 显式披露、异步任务状态、错误、修复反馈和来源不确定性 |
+| 查看规则 | Source Field → Target Field，操作与缺失/null 策略，完整 MappingSpec |
+| 运行预览 | Raw 与 Normalized 对比，逐事件原始指针关联 |
+| 运行验证 | L1/L2/L3、error/warning/unverified 和发布阻断原因 |
+| 人工审核发布 | 最新有效报告、审核说明、精确证据绑定，发布前再次确认 |
+| 查历史与使用 | 固定版本快照，实际 Job / Run / Attempt 产物计数，链接原 Replay |
+
+Registry Bearer 仅保存在页面内存，不写 localStorage、sessionStorage 或 URL。页面使用独立缓存；离开或断开后清除本页状态。reader / editor / publisher 权限由服务端确定；前端按钮和确认框不替代鉴权。
+
+生成只在 queued/running 轮询；错误或终态停止，允许手动恢复。POST 不自动重试。提交生成请求时发生网络错误，应先查看历史任务，确认是否已入队，再决定是否显式重试。
+
+详细流程：[Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md)。
+
+## 建议的演示路径
+
+### 路径 A：不使用在线模型，展示平台工程闭环
+
+适合首次评审、现场网络受限或希望控制费用的场景。
+
+| 顺序 | 打开哪里 | 展示什么 |
+| --- | --- | --- |
+| 1 | `/evaluation-jobs/new` | 创建真实持久化 Job，说明案例、数据集标签和版本标签 |
+| 2 | `/evaluation-jobs/:jobId` | Worker 状态、处理进度、执行尝试、取消与 Experiment 关联 |
+| 3 | Experiment / Run Detail | 从汇总进入原始案例输出、指标明细和失败原因 |
+| 4 | `/runs/:runId/timeline` | 展示持久化 Trace；说明执行身份与事件来源 |
+| 5 | `/adapter-studio` | 导入异构样本，查看 Schema、创建人工候选、预览和验证 |
+| 6 | Gate API / Swagger | 比较两个已完成实验，查看规则级发布判定 |
+
+默认 DemoAgent 返回固定格式响应；要展示丰富模型/工具事件，应使用已有 Tracing / LangGraph 适配器的测试，或路径 B 的真实业务 Agent。
+
+Studio 可在不配置模型生成预算时使用人工候选。现成的离线样本、独立 Golden 和预先编写的修复规则见 [mini_mapping_agent.json](backend/tests/fixtures/mini_mapping_agent.json)：将 raw_response / golden 放入样本批次，将 repair_reply.mapping 作为人工规则。此方式验证管理与确定性链路，不代表真实 LLM 生成效果。
+
+### 路径 B：展示独立业务 Agent 的真实评测
+
+入口：`/comparison`，侧栏 **Agent Showcase**。它是专门的业务演示页；通用 Experiment Comparison 与 Gate 通过后端 API 使用，`/gate` 当前仍为占位页。
+
+演示连接独立部署的业务 Agent，包含七个精选诊断案例：
+
+- BM25 与 Hybrid + Reranker + 证据门控的检索/引用表现；
+- 多来源问题、无答案拒答与只读业务工具调用；
+- 显式注入 Dense 故障、结构化失败 Trace，以及移除故障后的真实执行。
+
+语料指纹用于避免旧标签对新语料产生虚假评分。已有持久化结果可以直接查看；创建新评测组才会触发新的 Agent 调用。
+
+**外部业务 Agent、Bridge、模型文件与其数据不包含在本仓库中。** 该演示是固定诊断集合，不是独立测试集上的质量提升证明，也不是单变量消融实验。部署与完整边界见 [业务 Agent 演示说明](docs/BUSINESS_AGENT_SHOWCASE.md)。
+
+## 运行项目
+
+以下命令在 **Ubuntu / WSL** 执行。浏览器使用本机 localhost。完整默认演示需要 PostgreSQL、API、Evaluation Worker 和前端；AI Mapping Generation 另需独立 Mapping Worker。
+
+### 1. 准备运行环境
+
+已验证环境：Python **3.12.3**、PostgreSQL **16**、Node **22.23.3**。前端使用 React 19、TypeScript 6、Vite 8、Tailwind 4；后端使用 FastAPI、Pydantic v2、psycopg 异步连接池。LangGraph / LangChain 用于框架适配和模型生成客户端。
+
+从仓库根目录首次安装：
+
+```bash
+python3.12 -m venv backend/.venv
+
+backend/.venv/bin/python -m pip install \
+  fastapi uvicorn 'pydantic>=2,<3' 'psycopg[binary,pool]>=3.2' \
+  python-dotenv httpx sqlalchemy aiosqlite \
+  langgraph langchain-core langchain-openai \
+  pytest pytest-asyncio
+
+# 使用已安装的 Node 22；如本机通过 nvm 管理，可先执行 nvm use 22
+npm --prefix frontend ci
 ```
 
-还有的甚至直接返回一个字符串。
+已有可用虚拟环境时无需重建。当前根 requirements.txt 保留历史 httpx2 项，且没有完整列出 dotenv / 异步测试依赖，因此这里显式列出当前运行与测试所需包。后端尚未提供可复现依赖锁文件；上述是环境准备命令，不是已验证的全新环境一键安装承诺。
 
-所以 Adapter 需要把这些不同的原始结果统一标准化。
+### 2. 配置独立开发数据库
 
-于是我们定义 `AgentResult`。
+准备一个可连接的 PostgreSQL 开发库，在本地 `backend/.env` 中填写：
 
-首先肯定需要最终输出，因此有：
+```dotenv
+HARNESS_DATABASE_URL="postgresql://USER:PASSWORD@127.0.0.1:5432/evalforge_dev"
+HARNESS_AGENT_KIND=demo
+```
+
+用实际账号替换 USER / PASSWORD。已有 .env 应保留并检查，不要覆盖。该文件已被 Git 忽略，不提交真实凭据。
+
+**首次初始化仅对选定的开发库执行。** 当前 Run / Experiment 的基础表由已有 Store.initialize 管理；Evaluation Job 及后续扩展使用显式 SQL 迁移。先创建基础表，再按顺序应用迁移：
+
+```bash
+cd backend
+.venv/bin/python - <<'PY'
+import asyncio
+from pathlib import Path
+
+from dotenv import load_dotenv
+from psycopg import AsyncConnection
+
+from app.config import get_database_url
+from app.harness.postgres_run_store import PostgresRunStore
+from app.harness.postgres_experiment_store import PostgresExperimentStore
+
+
+async def initialize():
+    """Create base tables and apply job migrations to the configured development DB."""
+    load_dotenv(".env")
+    dsn = get_database_url()
+    async with PostgresRunStore(dsn) as runs, PostgresExperimentStore(dsn) as experiments:
+        await runs.initialize()
+        await experiments.initialize()
+
+    async with await AsyncConnection.connect(dsn, autocommit=True) as conn:
+        for name in ("v0131_evaluation_jobs.sql", "v0136_recovery.sql"):
+            await conn.execute((Path("migrations") / name).read_text())
+
+
+asyncio.run(initialize())
+PY
+cd ..
+```
+
+可选 Intelligent Adapter 的迁移顺序为 `v014_adapter_registry.sql` → `v015_pinned_mapping_evaluation.sql`，在上述基础表和 Job 迁移之后应用。应用不会自动执行这些可选迁移。
+
+### 3. 启动 API、评测 Worker 与前端
+
+三个终端分别执行：
+
+```bash
+# 终端一：API
+cd backend
+.venv/bin/python -m uvicorn app.main:app \
+  --env-file .env --host 0.0.0.0 --port 8013
+```
+
+```bash
+# 终端二：Evaluation Worker
+cd backend
+.venv/bin/python -m app.worker
+```
+
+```bash
+# 终端三：前端，从仓库根目录执行
+VITE_API_BASE_URL=http://127.0.0.1:8013 \
+  npm --prefix frontend run dev -- --host 0.0.0.0 --port 5173 --strictPort
+```
+
+访问：
+
+- 前端：[http://localhost:5173/evaluation-jobs](http://localhost:5173/evaluation-jobs)
+- API 文档：[http://127.0.0.1:8013/docs](http://127.0.0.1:8013/docs)
+- 健康检查：[http://127.0.0.1:8013/health](http://127.0.0.1:8013/health)
+
+API 与 Worker 必须使用同一个数据库和一致的 Agent 配置。当前 CORS 允许 localhost:5173 与 127.0.0.1:5173；浏览器使用 WSL Network IP 或 Vite 自动切换端口会被拒绝。前端默认 API 地址为 8000，此处显式使用 8013，避免本机端口冲突。
+
+### 4. 创建第一个真实持久化 Job
+
+```bash
+curl -sS http://127.0.0.1:8013/evaluation-jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "first-demo-evaluation",
+    "dataset_version": "demo-dataset-v1",
+    "agent_version": "demo-v1",
+    "cases": [
+      {
+        "id": "rag-001",
+        "input_text": "Explain RAG.",
+        "expected_output": "Demo Agent response: Explain RAG.",
+        "expected_tool_calls": [],
+        "metadata": {}
+      }
+    ]
+  }'
+```
+
+接口返回 job_id。Worker 处理后，可从任务进入 Experiment、Run 和 Timeline。
+
+agent_version、model_name、prompt_version 是实验记录标签，**不会仅凭标签自动部署模型或切换 Agent**。当前运行实现由服务端 HARNESS_AGENT_KIND 决定。CSV / JSON / JSONL 的加载和字段归一化已有库接口，当前没有完整 Dataset 管理 CRUD 页面/API。
+
+### 5. 可选：启用 Adapter Studio 与 AI 生成
+
+在已应用 v014 / v015 后，按 [Registry 配置说明](docs/INTELLIGENT_ADAPTER_REGISTRY.md) 配置：
+
+| 配置 | 用途 |
+| --- | --- |
+| HARNESS_ADAPTER_REGISTRY_ENABLED=1 | 启用 API / Evaluation Worker 的 Registry 读取能力 |
+| HARNESS_ADAPTER_PRINCIPALS | 服务端 token_sha256、subject、role 绑定 |
+| HARNESS_MAPPING_GENERATION_BUDGET | 服务端 Token / 费用 / 次数 / 超时预算；不配置仍可使用人工规则流程 |
+| MAPPING_LLM_MODEL / MAPPING_LLM_API_KEY | 独立 Mapping Worker 的模型配置 |
+| MAPPING_LLM_BASE_URL | 可选模型供应商地址 |
+
+重启 API / Evaluation Worker，使可选配置生效。Mapping Worker 与 Evaluation Worker 是不同入口；前者从进程环境读取配置，启动前需显式导入：
+
+```bash
+# 单独终端；仅在已配置模型和预算时启动
+cd backend
+set -a
+source .env
+set +a
+.venv/bin/python -m app.registry.worker
+```
+
+在 Studio 输入服务端配置的 Bearer，完成样本与规则流程。正式评测绑定 Mapping 时，创建 Job 还需显式提供 adapter_id、正整数 adapter_version，并使用 editor 以上 Registry 凭据；当前该响应集成要求 Business HTTP 模式。不要使用 latest，也不要将模型生成接口放入逐 Case 运行路径。
+
+## 测试与验证证据
+
+以下是 **截至 2026-10-24 的具体验证范围**，各组存在交叉，不能相加当作独立测试总数；不以此宣称全项目全绿或生产容量已验证。
+
+| 范围 | 最近实际结果 | 环境与说明 |
+| --- | --- | --- |
+| DSL / Runtime / Inspector / Validator / Mini Mapping Agent | **443 passed，1.99s** | 本次 README 核对时重跑；离线，无真实 API Key |
+| Registry + Stage 7 评测集成 + Stage 8 API | **70 passed，23.27s** | Stage 8 记录；真实隔离 PostgreSQL，Agent / LLM 使用替身 |
+| 前端单元 / API 契约 | **14 passed** | Node 内置测试器 + Vite Loader |
+| 前端真实浏览器交互 | **6 passed，24.52s** | Chrome + Fake Registry；覆盖完整审核发布、鉴权失败、网络恢复及旧页面导航 |
+| 前端生产构建 / lint | **通过** | tsc -b + Vite build；JS gzip 113.99 kB |
+
+### 无数据库、无在线模型的核心测试
+
+在仓库根目录执行：
+
+```bash
+backend/.venv/bin/python -m pytest -q \
+  backend/tests/test_intelligent_mapping_contracts.py \
+  backend/tests/test_intelligent_mapping_runtime.py \
+  backend/tests/test_schema_inspector.py \
+  backend/tests/test_mapping_validator.py \
+  backend/tests/test_mini_mapping_agent.py
+
+npm --prefix frontend test
+npm --prefix frontend run build
+npm --prefix frontend run lint
+```
+
+### 数据库事务与恢复测试
+
+在**专用隔离 PostgreSQL 测试实例**中配置 ADAPTER_REGISTRY_TEST_DSN，再执行：
+
+```bash
+backend/.venv/bin/python -m pytest -q \
+  backend/tests/test_adapter_studio_api.py \
+  backend/tests/test_adapter_registry.py \
+  backend/tests/test_published_mapping_evaluation.py --tb=short
+```
+
+覆盖发布事务回滚、并发版本分配、不可变约束、角色鉴权、Lease / Heartbeat / Checkpoint、固定版本恢复、Mapping 故障隔离、Raw 关联、Replay 和指标语义。新测试为每项创建独立 schema 并保留数据；旧 PostgreSQL 测试另使用 TEST_POSTGRES_DSN，不应指向开发或生产数据。
+
+### 浏览器交互测试
+
+测试脚本复用环境中已有 Playwright 与 Chrome，不将其加入前端项目依赖。启动 Vite，设置 STUDIO_PLAYWRIGHT_MODULE、STUDIO_BROWSER_EXECUTABLE；必要时设置 STUDIO_BASE_URL。在 frontend 目录运行：
+
+```bash
+node --test --test-reporter=tap tests/browser/adapterStudio.browser.mjs
+```
+
+浏览器中的生成、验证响应是明确的 Fake Registry 数据，不能据此推断在线模型质量；真实服务和数据库行为由后端测试覆盖。详细命令与记录见 [Studio 验证说明](docs/INTELLIGENT_ADAPTER_STUDIO.md)。
+
+**已知测试债务：** 较大范围回归曾确认 `test_v11_experiment.py::test_duplicate_case_is_rejected` 的异常类型预期与 InMemoryExperimentStore 实现不一致，在原 Git HEAD 也可复现。该问题尚未修复；完整历史记录见 [Stage 7 集成说明](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) 与 [变更记录](AI_CHANGELOG.md)。
+
+## 主要 API
+
+以下路径已从当前 FastAPI OpenAPI 核对，完整字段以运行中的 `/docs` 为准。
+
+| 领域 | 入口 |
+| --- | --- |
+| 异步评测 | POST /evaluation-jobs；GET 列表、详情、/{id}/progress；POST /{id}/cancel |
+| 实验 | POST /experiments/run；GET /experiments、/experiments/{id} |
+| 执行证据 | GET /runs、/runs/{id}、/runs/{id}/timeline |
+| 版本比较 | POST /comparisons/experiments |
+| 质量门禁 | POST /gates/evaluate |
+| Adapter Profile / 样本 | /adapter-registry/profiles；/profiles/{id}/samples；/samples/{id} |
+| 规则生成 / 候选 | /profiles/{id}/generations；/generations/{id}；/profiles/{id}/candidates |
+| 预览 / 验证 / 审核 / 发布 | POST /adapter-registry/candidates/{id}/preview、validate、review、publish |
+| 固定版本 / 使用 | GET /adapter-registry/profiles/{id}/versions、/versions/{version}、/versions/{version}/usage |
+| 私有原始产物 | GET /adapter-registry/runs/{run_id}/mapping-artifacts |
+
+表中 Profile / 样本 / 生成候选的相对路径均在 /adapter-registry 下。Registry 接口和显式绑定 Mapping 的 Job 创建已有独立权限检查；旧评测 API 尚无全局统一认证，公开部署前需要补齐。
+
+## 源码导读
 
 ```text
-output_text
+backend/
+├── app/
+│   ├── adapters/            # Local / LangGraph / Business HTTP 边界
+│   │   └── intelligent/     # DSL、Runtime、Inspector、Validator、生成与固定版本集成
+│   ├── agent/              # 本地与 LangGraph 演示 Agent
+│   ├── api/                # FastAPI 路由与错误处理
+│   ├── schemas/            # HTTP 请求/响应模型
+│   ├── datasets/           # CSV / JSON / JSONL 与 TestCase 归一化
+│   ├── evaluator/          # 质量、工具、时延、Token、费用与业务 RAG 指标
+│   ├── harness/            # Contracts、Runner、Trace、Store、Experiment、Comparison、Gate
+│   ├── jobs/               # 评测任务状态机、持久化领取与恢复执行器
+│   ├── registry/           # 规则持久化、鉴权、审核发布、独立生成 Worker
+│   ├── runtime_factory.py  # 服务端实际 Agent / Evaluator 选择
+│   └── worker.py           # 独立 Evaluation Worker
+├── migrations/             # 显式 SQL 迁移
+├── scripts/                # 业务 Agent 模式启动脚本
+└── tests/                  # 单元、契约、真实 PostgreSQL 与集成测试
+frontend/
+├── src/
+│   ├── api/                # 复用请求 Client 与类型化接口
+│   ├── components/         # 既有页面、Job 与 Adapter Studio 组件
+│   ├── hooks/              # Query / 命令 / 轮询生命周期
+│   ├── pages/              # Job、Experiment、Run、Timeline、Showcase、Studio
+│   ├── types/              # 前端传输契约
+│   └── utils/              # 表单、披露与显示纯函数
+└── tests/                  # Node 契约测试与可选浏览器交互测试
+docs/                       # 各模块设计、启动说明和验证边界
 ```
 
-其次，我们希望能够记录完整 Agent 执行轨迹，所以需要：
-
-```text
-trace
-```
-
-另外不同 Agent 可能还会返回：
-
-```text
-model
-token_usage
-finish_reason
-session_id
-```
-
-等额外信息，所以再提供：
-
-```text
-metadata
-```
-
-因此：
-
-```text
-AgentResult
-├── output_text
-├── trace
-└── metadata
-```
-
-它表示：
-
-> 一次 Agent Execution 被 Adapter 标准化之后的统一结果。
-
-整体关系就是：
-
-```text
-外部 Agent
-    ↓
-raw_result
-    ↓
-Adapter normalize
-    ↓
-AgentResult
-```
-
-到这里，Agent 的执行结果已经进入 Harness 的统一世界。
-
-下一步就需要进行评估。
-
-但是 Evaluator 要拿什么进行比较？
-
-除了 AgentResult 之外，还需要知道：
-
-```text
-这个 Agent 原本接受的题目是什么？
-我们期望它达到什么结果？
-```
-
-因此我们需要统一定义测试用例，也就是 `TestCase`。
-
-这里并不是说用户不能自己定义测试数据，而是：
-
-> 不管原始 Dataset 来源是什么，在进入 Harness Core 之前，都应该统一转换成 TestCase。
-
-比如某个 Dataset 可能使用：
-
-```text
-question
-reference
-```
-
-另一个 Dataset 可能使用：
-
-```text
-prompt
-gold_answer
-```
-
-进入 Harness 后都应该转换成：
-
-```text
-TestCase
-```
-
-TestCase 至少包含：
-
-```text
-id
-input_text
-expected_output
-metadata
-```
-
-其中：
-
-`id` 用来唯一标识这道测试用例。
-
-`input_text` 表示需要发送给 Agent 的输入。
-
-`expected_output` 表示参考答案或者期望结果，用于后续评估。
-
-`metadata` 用于保存分类、难度、标签、来源等额外信息。
-
-这里还有一个非常重要的设计：
-
-`expected_output` 只属于评估阶段，不能发送给 Agent。
-
-所以：
-
-```text
-TestCase
-    ↓
-HarnessRunner
-    ↓
-只取 input_text
-    ↓
-AgentRequest
-```
-
-而：
-
-```text
-expected_output
-```
-
-会保留下来，在 Agent 执行完成之后交给 Evaluator。
-
-这样可以避免 Agent 在执行时看到标准答案，造成 Evaluation Contamination。
-
-当 Evaluator 拿到：
-
-```text
-TestCase
-+
-AgentResult
-```
-
-之后，就可以开始进行评估。
-
-但是 Agent Evaluation 肯定不只有一个指标。
-
-以后可能会有：
-
-```text
-Answer Quality
-Tool Accuracy
-Tool Efficiency
-Latency
-Cost
-Trajectory Quality
-```
-
-因此需要统一表示一个指标的评估结果。
-
-于是定义 `MetricResult`。
-
-里面至少需要：
-
-```text
-name
-score
-details
-```
-
-其中：
-
-`name` 表示是什么指标。
-
-比如：
-
-```text
-keyword_match
-answer_quality
-tool_efficiency
-```
-
-`score` 表示具体得分。
-
-而 `details` 用来解释：
-
-> 为什么得到这个分数。
-
-例如：
-
-```text
-score = 0.67
-```
-
-还不够，我们可能还希望知道：
-
-```text
-matched = ["检索", "生成"]
-missing = ["增强"]
-```
-
-所以 `details` 才是解释单个指标评分原因的地方。
-
-但是一道 TestCase 通常会经过多个 Evaluator。
-
-因此最终不能只返回一个 MetricResult。
-
-比如一道题可能得到：
-
-```text
-Answer Quality = 0.9
-Tool Accuracy = 1.0
-Latency = 0.7
-Cost = 0.8
-```
-
-除此之外，我们还需要知道：
-
-```text
-这道题是什么？
-Agent 实际回答了什么？
-完整 Trace 是什么？
-执行有没有失败？
-最终综合得分是多少？
-```
-
-所以我们需要更高一层的数据结构：
-
-```text
-CaseResult
-```
-
-CaseResult 可以理解成：
-
-> 一道 TestCase 完整执行后的评测档案。
-
-它内部可以包含：
-
-```text
-case_id
-input_text
-expected_output
-actual_output
-metrics
-score
-trace
-error
-```
-
-这里要注意：
-
-`MetricResult.details` 负责解释某一个指标为什么得到某个分数。
-
-而 `CaseResult` 负责聚合一整道测试用例的全部执行和评估信息。
-
-最后，一个 Benchmark 通常不会只有一个 TestCase，而是有几十、几百甚至几千个 Case。
-
-所以我们还需要最外层的：
-
-```text
-EvaluationReport
-```
-
-它负责聚合多个 CaseResult。
-
-结构大致是：
-
-```text
-EvaluationReport
-│
-├── CaseResult #1
-│   ├── MetricResult
-│   ├── MetricResult
-│   └── TraceEvent[]
-│
-├── CaseResult #2
-│   ├── MetricResult
-│   ├── MetricResult
-│   └── TraceEvent[]
-│
-└── CaseResult #3
-```
-
-所以从数据结构角度看，我们最终形成了这样一套协议：
-
-```text
-AgentRequest
-↓
-描述一次 Agent 执行请求
-
-AgentResult
-↓
-描述一次 Agent 标准化执行结果
-
-TraceEvent
-↓
-描述 Agent 执行过程中发生的事件
-
-TestCase
-↓
-描述一道标准测试用例
-
-MetricResult
-↓
-描述一个评估指标的结果
-
-CaseResult
-↓
-描述一道 TestCase 完整执行后的结果
-
-EvaluationReport
-↓
-描述一整个 Benchmark 的评估报告
-```
-
-但是有了这些协议之后，还需要一个核心模块把所有东西组织起来。
-
-这个模块就是：
-
-```text
-HarnessRunner
-```
-
-Runner 本身不应该知道：
-
-```text
-LangGraph 怎么调用
-Pi 怎么调用
-Keyword 怎么计算
-LLM Judge 怎么实现
-```
-
-Runner 只负责整个 Evaluation 生命周期的编排。
-
-也就是：
-
-```text
-拿到 TestCase
-↓
-构造 AgentRequest
-↓
-交给 AgentAdapter
-↓
-Adapter 调用具体 Agent
-↓
-得到并标准化为 AgentResult
-↓
-交给多个 Evaluator
-↓
-得到多个 MetricResult
-↓
-组合成 CaseResult
-↓
-所有 Case 执行完成
-↓
-组合成 EvaluationReport
-```
-
-因此整个 Harness 最终形成以下架构：
-
-```text
-                   Dataset
-                      │
-                      ▼
-                  TestCase
-                      │
-                      ▼
-                HarnessRunner
-                      │
-                AgentRequest
-                      │
-                      ▼
-                 AgentAdapter
-                      │
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-      LangGraph       Pi        HTTP
-          │           │           │
-          └───────────┼───────────┘
-                      │
-                 raw_result
-                      │
-                   normalize
-                      │
-                      ▼
-                  AgentResult
-                    │      │
-                    │      └──────────────┐
-                    ▼                     │
-                Evaluators                │
-                    │                     │
-              MetricResult[]              │
-                    │                     │
-                    └──────────┬──────────┘
-                               ▼
-                           CaseResult
-                               │
-                      多个 CaseResult
-                               │
-                               ▼
-                      EvaluationReport
-```
-
-其中 Trace 是横穿 Agent 整个执行过程的一条记录链。
-
-例如：
-
-```text
-agent_start
-↓
-model_call
-↓
-model_result
-↓
-tool_call
-↓
-tool_result
-↓
-model_call
-↓
-model_result
-↓
-agent_end
-```
-
-最终这些事件会进入 AgentResult 的 `trace` 中。
-
-这样 Harness 以后就不仅能够评价：
-
-```text
-最终答案好不好
-```
-
-还可以进一步评价：
-
-```text
-Agent 调用了哪些工具
-工具调用是否正确
-调用了多少次
-有没有重复调用
-模型调用了几轮
-执行路径是否合理
-是否发生异常
-整个 trajectory 是否高效
-```
-
-所以目前这个项目真正的核心思想可以总结为：
-
-> Harness Core 不应该依赖任何具体 Agent Framework，而应该通过 Adapter 层隔离不同 Agent 的实现差异，通过 Contracts 定义 Harness 内部统一的数据协议，再由 HarnessRunner 负责执行生命周期编排，由 Evaluator 负责不同维度的评估，最终统一生成 CaseResult 和 EvaluationReport。
-
-目前 v0.1 实现的本质就是：
-
-```text
-Framework-Agnostic Agent Evaluation Core
-```
-
-而下一阶段继续实现 TraceCollector，就是为了把当前只记录 `agent_start / agent_end / error` 的基础 Trace，升级成能够真正描述 Agent Runtime 行为的完整执行轨迹。
-
-## V0.8 — RunContext and trace lifecycle
-
-HarnessRunner owns one RunContext for each case execution. RunContext creates a
-fresh UUID run_id, a private TraceCollector, a monotonic start time, and an
-isolated metadata snapshot. case_id remains the dataset identity; it may repeat
-across executions. AgentRequest remains a data contract and does not contain
-RunContext.
-
-All adapters implement `run(request, context)`. LocalAgentAdapter,
-LangGraphAdapter, and TracingDemoAdapter write native execution events into
-`context.trace`; they do not own `agent_start` or `agent_end`. The runner records
-start, closes successful agent execution, refreshes AgentResult.trace, and only
-then invokes evaluators. Failed and timed-out executions retain their partial
-trace and finish with an error rather than a successful agent_end. Evaluator
-failures preserve the already-completed agent trace and are isolated per case.
-
-LangGraph callbacks share the same collector. LangChain callback UUIDs identify
-individual model/tool invocations; they differ from the harness execution UUID.
-Graph config metadata contains `harness_run_id`. An explicitly supplied
-`thread_id` remains the conversation/checkpoint identity and is never derived
-from the harness run_id. CaseResult keeps its existing contract; the execution
-identity is available in lifecycle trace metadata.
-
-Run the complete offline regression suite from the project root:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Tests include a real compiled LangGraph with fake model responses and a real
-ToolNode, so no model API key or paid network call is required. The standalone
-`backend/app/langgraph_test_runner.py` remains a separate external-model demo.
-
-Timeouts use asyncio.wait_for and cooperative coroutine cancellation. Blocking
-synchronous agents and agents that suppress cancellation do not have a hard
-process-level deadline. Adapters can preserve events already written to the
-shared collector; native events buffered inside an agent and never returned are
-not visible to the harness.
+建议按“契约 → 编排 → 持久化恢复 → 规则治理 → 界面”的顺序阅读：
+
+1. [contracts.py](backend/app/harness/contracts.py) 与 [context.py](backend/app/harness/context.py)：先理解数据和身份。
+2. [runner.py](backend/app/harness/runner.py)：跟踪一个 Case 的生命周期、重试、错误与保存。
+3. [executor.py](backend/app/jobs/executor.py) 与 [JobStore](backend/app/jobs/postgres_store.py)：看进程重启与旧 Worker 竞争时的行为。
+4. [runtime.py](backend/app/adapters/intelligent/runtime.py) 与 [validator.py](backend/app/adapters/intelligent/validator.py)：看未知数据如何被约束和解释。
+5. [Registry Store](backend/app/registry/postgres_store.py) 与 [v014](backend/migrations/v014_adapter_registry.sql)：看发布事务、并发和不可变性。
+6. [published.py](backend/app/adapters/intelligent/published.py)：看 AI 生成如何与正式执行隔离。
+7. [AdapterStudioPage.tsx](frontend/src/pages/AdapterStudioPage.tsx) 与 [ReviewWorkspace.tsx](frontend/src/components/adapters/ReviewWorkspace.tsx)：最后看端到端操作如何落到上述服务。
+
+## 设计文档
+
+| 主题 | 文档 |
+| --- | --- |
+| 真实业务 Agent 与诊断案例 | [Business Agent Showcase](docs/BUSINESS_AGENT_SHOWCASE.md) |
+| Mapping 配置契约 | [Mapping DSL](docs/INTELLIGENT_ADAPTER_MAPPING_DSL.md) |
+| 路径提取、类型与确定性执行 | [Mapping Runtime](docs/INTELLIGENT_ADAPTER_MAPPING_RUNTIME.md) |
+| 多样本结构分析与 Fingerprint | [Schema Inspector](docs/INTELLIGENT_ADAPTER_SCHEMA_INSPECTOR.md) |
+| 三层验证与独立期望 | [Validator / Golden Tests](docs/INTELLIGENT_ADAPTER_MAPPING_VALIDATOR.md) |
+| 受限生成、证据与有界修复 | [Mini Mapping Agent](docs/INTELLIGENT_ADAPTER_MINI_MAPPING_AGENT.md) |
+| 身份、队列、审核与发布事务 | [Adapter Registry](docs/INTELLIGENT_ADAPTER_REGISTRY.md) |
+| 版本绑定、故障隔离与指标一致性 | [Evaluation Integration](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) |
+| 前端操作闭环与交互测试 | [Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md) |
+
+## 当前边界与下一步
+
+| 当前边界 | 下一步工程工作 |
+| --- | --- |
+| 后端依赖清单遗留、未锁定；迁移由 Store 初始化和 SQL 脚本共同管理 | 整理可复现依赖、统一迁移入口和干净环境安装验证 |
+| 旧评测 API 无全局认证；Registry 为本地全局角色 | 统一身份、细粒度权限、多租户与部署边界 |
+| Raw / Golden / 报告可能包含敏感数据，尚无自动保留与清理策略 | 数据分级、脱敏策略、存储/备份与生命周期管理 |
+| 高并发吞吐和大规模历史使用查询未压测 | 容量基线、索引、查询计划与队列积压监控 |
+| 现有质量指标以确定性规则和参考标注为主 | 扩充独立评测集；需要语义 Judge 时单独校准其可靠性与成本 |
+| Gate 已提供 API，前端专页与 CI 阻断未完成 | 构建自动回归工作流并明确失败/未知证据策略 |
+| Bridge 是独立项目的本地接入；Checkpoint 不保证外部副作用 exactly-once | 接入协议版本化，以及面向具体 Agent 的幂等与取消设计 |
+
+**项目的核心工程价值，是把不确定的 Agent 行为放入有契约、有执行所有权、有证据、有版本边界的评测流程，让“看起来更好”变成可以检查和讨论的结论。**

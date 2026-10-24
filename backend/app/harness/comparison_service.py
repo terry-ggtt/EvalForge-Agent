@@ -1,3 +1,4 @@
+from app.harness.metric_semantics import ensure_metric_semantics
 from collections import (
     Counter,
 )
@@ -112,6 +113,8 @@ class ComparisonService:
         require_same_case: bool = True,
     ) -> RunComparison:
 
+        """Compare baseline/candidate records; require_same_case controls matching; mapped pipeline failures are unevaluable."""
+        ensure_metric_semantics([baseline, candidate])
         baseline_case_id = (
             baseline.case.id
         )

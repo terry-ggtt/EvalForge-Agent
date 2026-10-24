@@ -1,5 +1,5 @@
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 from typing import Any
 from uuid import uuid4
@@ -20,6 +20,8 @@ class RunContext:
     current_attempt: (
         AttemptContext | None
     ) = None
+    mapping_artifacts: list[dict[str, Any]] = field(default_factory=list)
+
     @classmethod
     def create(
         cls,

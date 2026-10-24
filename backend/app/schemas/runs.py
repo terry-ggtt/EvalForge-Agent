@@ -3,7 +3,7 @@ from datetime import (
 )
 
 from typing import (
-    Any,
+    Any, Literal,
 )
 
 from pydantic import (
@@ -220,7 +220,9 @@ class CaseResultResponse(
         default_factory=list
     )
 
-    score: float = 0.0
+    score: float | None = 0.0
+
+    failure_kind: Literal["agent_execution", "mapping", "evaluation"] | None = None
 
     trace: list[
         TraceEventResponse
@@ -264,6 +266,8 @@ class CaseResultResponse(
 
             score=
                 result.score,
+
+            failure_kind=result.failure_kind,
 
             trace=[
                 TraceEventResponse

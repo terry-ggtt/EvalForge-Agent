@@ -32,6 +32,12 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def validate_adapter_binding(adapter_id: str | None, adapter_version: int | None) -> None:
+    """Require explicit adapter_id/version together; return None or raise ValueError, never resolve latest."""
+    if (adapter_id is None) != (adapter_version is None):
+        raise ValueError("adapter_id and adapter_version must be supplied together")
+
+
 class EvaluationJobPayload(BaseModel):
     """
     Canonical input for an asynchronous
@@ -43,6 +49,10 @@ class EvaluationJobPayload(BaseModel):
     dataset_version: str = Field(min_length=1)
 
     agent_version: str = Field(min_length=1)
+
+    adapter_id: str | None = Field(default=None, strict=True, min_length=1, max_length=200, pattern=r"\S")
+    adapter_version: int | None = Field(default=None, strict=True, ge=1)
+    adapter_mapping_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     model_name: str | None = None
 
@@ -74,6 +84,10 @@ class EvaluationJobPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_cases(self):
+        """Validate this job's cases and explicit mapping pair; return self or reject invalid payload."""
+        validate_adapter_binding(self.adapter_id, self.adapter_version)
+        if self.adapter_id is None and self.adapter_mapping_digest is not None:
+            raise ValueError("Mapping digest requires an adapter binding")
         seen: set[str] = set()
 
         for case in self.cases:

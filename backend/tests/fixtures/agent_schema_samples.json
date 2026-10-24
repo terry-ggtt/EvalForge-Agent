@@ -1,0 +1,52 @@
+{
+  "samples": [
+    {
+      "answer": "已找到 VPN 说明",
+      "events": [
+        {
+          "kind": "llm.finished",
+          "at": "2026-10-23T09:00:00+08:00",
+          "model": "provider-a",
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 4
+          }
+        },
+        {
+          "kind": "tool.started",
+          "tool": "search",
+          "args": {
+            "query": "VPN"
+          }
+        }
+      ]
+    },
+    {
+      "result": {
+        "message": "请参阅内网配置",
+        "request_id": "request-b"
+      },
+      "telemetry": {
+        "spans": [
+          {
+            "event": "model_end",
+            "name": "provider-b",
+            "tokens": {
+              "input": 18,
+              "output": null
+            }
+          },
+          {
+            "event": "tool_call",
+            "name": "search",
+            "arguments": {
+              "text": "VPN"
+            },
+            "latency_ms": 12.5
+          }
+        ]
+      },
+      "error": null
+    }
+  ]
+}

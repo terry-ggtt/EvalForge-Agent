@@ -1,3 +1,8 @@
+from app.api.adapter_registry import (
+    router as adapter_registry_router, registry_lifespan, registry_error_handler,
+)
+from app.registry.models import RegistryError
+
 from fastapi.middleware.cors import (
     CORSMiddleware,
 )
@@ -193,7 +198,8 @@ async def lifespan(
             app.state.experiment_comparison_service = (
                 experiment_comparison_service
             )
-            yield
+            async with registry_lifespan(app, database_url):
+                yield
 
 
 def create_app() -> FastAPI:
@@ -236,6 +242,12 @@ def create_app() -> FastAPI:
     register_exception_handlers(
         application
     )
+
+    from app.api.showcase import router as showcase_router
+    application.include_router(showcase_router)
+
+    application.include_router(adapter_registry_router)
+    application.add_exception_handler(RegistryError, registry_error_handler)
 
     application.include_router(
         health_router

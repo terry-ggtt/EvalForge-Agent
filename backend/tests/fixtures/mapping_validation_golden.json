@@ -1,0 +1,469 @@
+{
+  "description": "Independent handwritten expected constants; never regenerated from runtime output. Awaiting user code review.",
+  "spec": {
+    "name": "span-validation-example",
+    "response": {
+      "fields": [
+        {
+          "target": "$.output_text",
+          "operation": {
+            "op": "extract",
+            "path": "$.answer"
+          },
+          "value_type": "string",
+          "on_null": "error"
+        }
+      ]
+    },
+    "trace": {
+      "events_path": "$.events",
+      "type_path": "$.kind",
+      "on_unknown_event": "error",
+      "rules": [
+        {
+          "source_type": "model",
+          "event_type": "model_result",
+          "fields": [
+            {
+              "target": "$.timestamp",
+              "operation": {
+                "op": "extract",
+                "path": "$.finished"
+              },
+              "value_type": "datetime",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload",
+              "operation": {
+                "op": "extract",
+                "path": "$.span"
+              },
+              "value_type": "object",
+              "on_null": "error"
+            }
+          ]
+        },
+        {
+          "source_type": "tool",
+          "event_type": "tool_call",
+          "fields": [
+            {
+              "target": "$.timestamp",
+              "operation": {
+                "op": "extract",
+                "path": "$.finished"
+              },
+              "value_type": "datetime",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload",
+              "operation": {
+                "op": "extract",
+                "path": "$.span"
+              },
+              "value_type": "object",
+              "on_null": "error"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "golden": {
+    "name": "manual-vpn-span-expectations",
+    "output_text": "VPN ready",
+    "spans": [
+      {
+        "span_id": "model-root",
+        "checks": [
+          {
+            "path": "$.type",
+            "expected": "model_result"
+          },
+          {
+            "path": "$.payload.span_type",
+            "expected": "model"
+          },
+          {
+            "path": "$.payload.usage.input_tokens",
+            "expected": 12
+          },
+          {
+            "path": "$.payload.usage.output_tokens",
+            "expected": 4
+          },
+          {
+            "path": "$.payload.usage.total_tokens",
+            "expected": 16
+          }
+        ]
+      },
+      {
+        "span_id": "tool-a",
+        "checks": [
+          {
+            "path": "$.type",
+            "expected": "tool_call"
+          },
+          {
+            "path": "$.payload.span_type",
+            "expected": "tool"
+          },
+          {
+            "path": "$.payload.tool_name",
+            "expected": "search"
+          },
+          {
+            "path": "$.payload.arguments",
+            "expected": {
+              "query": "VPN"
+            }
+          },
+          {
+            "path": "$.payload.call_id",
+            "expected": "call-a"
+          }
+        ]
+      },
+      {
+        "span_id": "tool-b",
+        "checks": [
+          {
+            "path": "$.type",
+            "expected": "tool_call"
+          },
+          {
+            "path": "$.payload.span_type",
+            "expected": "tool"
+          },
+          {
+            "path": "$.payload.tool_name",
+            "expected": "lookup"
+          },
+          {
+            "path": "$.payload.arguments",
+            "expected": {
+              "id": 42
+            }
+          },
+          {
+            "path": "$.payload.call_id",
+            "expected": "call-b"
+          }
+        ]
+      }
+    ]
+  },
+  "samples": {
+    "correct": {
+      "answer": "VPN ready",
+      "events": [
+        {
+          "kind": "model",
+          "finished": "2026-10-23T09:00:10+08:00",
+          "span": {
+            "span_id": "model-root",
+            "parent_span_id": null,
+            "span_type": "model",
+            "start_time": "2026-10-23T09:00:00+08:00",
+            "end_time": "2026-10-23T09:00:10+08:00",
+            "duration_ms": 10000,
+            "usage": {
+              "input_tokens": 12,
+              "output_tokens": 4,
+              "total_tokens": 16
+            }
+          }
+        },
+        {
+          "kind": "tool",
+          "finished": "2026-10-23T09:00:07+08:00",
+          "span": {
+            "span_id": "tool-a",
+            "parent_span_id": "model-root",
+            "span_type": "tool",
+            "start_time": "2026-10-23T09:00:01+08:00",
+            "end_time": "2026-10-23T09:00:07+08:00",
+            "duration_ms": 6000,
+            "tool_name": "search",
+            "arguments": {
+              "query": "VPN"
+            },
+            "call_id": "call-a"
+          }
+        },
+        {
+          "kind": "tool",
+          "finished": "2026-10-23T09:00:08+08:00",
+          "span": {
+            "span_id": "tool-b",
+            "parent_span_id": "model-root",
+            "span_type": "tool",
+            "start_time": "2026-10-23T09:00:02+08:00",
+            "end_time": "2026-10-23T09:00:08+08:00",
+            "duration_ms": 6000,
+            "tool_name": "lookup",
+            "arguments": {
+              "id": 42
+            },
+            "call_id": "call-b"
+          }
+        }
+      ]
+    },
+    "missing_fields": {
+      "answer": "VPN ready",
+      "events": [
+        {
+          "kind": "model",
+          "finished": "2026-10-23T09:00:10+08:00",
+          "span": {
+            "span_id": "model-root",
+            "parent_span_id": null,
+            "span_type": "model",
+            "start_time": "2026-10-23T09:00:00+08:00",
+            "end_time": "2026-10-23T09:00:10+08:00",
+            "duration_ms": 10000,
+            "usage": {
+              "input_tokens": 12,
+              "total_tokens": 16
+            }
+          }
+        },
+        {
+          "kind": "tool",
+          "finished": "2026-10-23T09:00:07+08:00",
+          "span": {
+            "span_id": "tool-a",
+            "span_type": "tool",
+            "start_time": "2026-10-23T09:00:01+08:00",
+            "end_time": "2026-10-23T09:00:07+08:00",
+            "duration_ms": 6000,
+            "tool_name": "search",
+            "call_id": "call-a"
+          }
+        },
+        {
+          "kind": "tool",
+          "finished": "2026-10-23T09:00:08+08:00",
+          "span": {
+            "span_id": "tool-b",
+            "parent_span_id": "model-root",
+            "span_type": "tool",
+            "start_time": "2026-10-23T09:00:02+08:00",
+            "end_time": "2026-10-23T09:00:08+08:00",
+            "duration_ms": 6000,
+            "tool_name": "lookup",
+            "arguments": {
+              "id": 42
+            },
+            "call_id": "call-b"
+          }
+        }
+      ]
+    },
+    "bad_topology": {
+      "answer": "VPN ready",
+      "events": [
+        {
+          "kind": "model",
+          "finished": "2026-10-23T09:00:10+08:00",
+          "span": {
+            "span_id": "model-root",
+            "parent_span_id": null,
+            "span_type": "model",
+            "start_time": "2026-10-23T09:00:00+08:00",
+            "end_time": "2026-10-23T09:00:10+08:00",
+            "duration_ms": 10000,
+            "usage": {
+              "input_tokens": 12,
+              "output_tokens": 4,
+              "total_tokens": 16
+            }
+          }
+        },
+        {
+          "kind": "tool",
+          "finished": "2026-10-23T09:00:07+08:00",
+          "span": {
+            "span_id": "tool-a",
+            "parent_span_id": "tool-b",
+            "span_type": "tool",
+            "start_time": "2026-10-23T09:00:01+08:00",
+            "end_time": "2026-10-23T09:00:07+08:00",
+            "duration_ms": 6000,
+            "tool_name": "search",
+            "arguments": {
+              "query": "VPN"
+            },
+            "call_id": "call-a"
+          }
+        },
+        {
+          "kind": "tool",
+          "finished": "2026-10-23T09:00:07+08:00",
+          "span": {
+            "span_id": "tool-b",
+            "parent_span_id": "tool-a",
+            "span_type": "tool",
+            "start_time": "2026-10-23T09:00:01+08:00",
+            "end_time": "2026-10-23T09:00:07+08:00",
+            "duration_ms": 6000,
+            "tool_name": "lookup",
+            "arguments": {
+              "id": 42
+            },
+            "call_id": "call-b"
+          }
+        }
+      ]
+    }
+  },
+  "semantic_wrong_spec": {
+    "name": "span-validation-example",
+    "response": {
+      "fields": [
+        {
+          "target": "$.output_text",
+          "operation": {
+            "op": "extract",
+            "path": "$.answer"
+          },
+          "value_type": "string",
+          "on_null": "error"
+        }
+      ]
+    },
+    "trace": {
+      "events_path": "$.events",
+      "type_path": "$.kind",
+      "on_unknown_event": "error",
+      "rules": [
+        {
+          "source_type": "model",
+          "event_type": "model_result",
+          "fields": [
+            {
+              "target": "$.timestamp",
+              "operation": {
+                "op": "extract",
+                "path": "$.finished"
+              },
+              "value_type": "datetime",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.span_id",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.span_id"
+              },
+              "value_type": "unknown",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.parent_span_id",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.parent_span_id"
+              },
+              "value_type": "unknown",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.span_type",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.span_type"
+              },
+              "value_type": "unknown",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.start_time",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.start_time"
+              },
+              "value_type": "unknown",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.end_time",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.end_time"
+              },
+              "value_type": "unknown",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.duration_ms",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.duration_ms"
+              },
+              "value_type": "unknown",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.usage.input_tokens",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.usage.input_tokens"
+              },
+              "value_type": "integer",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.usage.output_tokens",
+              "operation": {
+                "op": "extract",
+                "path": "$.span.usage.output_tokens"
+              },
+              "value_type": "integer",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload.usage.total_tokens",
+              "operation": {
+                "op": "enum_map",
+                "path": "$.kind",
+                "values": {
+                  "model": 20
+                }
+              },
+              "value_type": "integer"
+            }
+          ]
+        },
+        {
+          "source_type": "tool",
+          "event_type": "tool_call",
+          "fields": [
+            {
+              "target": "$.timestamp",
+              "operation": {
+                "op": "extract",
+                "path": "$.finished"
+              },
+              "value_type": "datetime",
+              "on_null": "preserve"
+            },
+            {
+              "target": "$.payload",
+              "operation": {
+                "op": "extract",
+                "path": "$.span"
+              },
+              "value_type": "object",
+              "on_null": "error"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

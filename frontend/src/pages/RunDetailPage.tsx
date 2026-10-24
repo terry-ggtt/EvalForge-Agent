@@ -1,3 +1,4 @@
+import { RunEvidencePanel } from "../components/jobs/RunEvidencePanel";
 import {
   useQuery,
 } from "@tanstack/react-query";
@@ -204,6 +205,8 @@ export function RunDetailPage() {
 
       </div>
 
+
+      <RunEvidencePanel run={run} />
 
       <section
         className="

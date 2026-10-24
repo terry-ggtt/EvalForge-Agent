@@ -34,9 +34,11 @@ import {
 import {
   RunTimelinePage,
 } from "./pages/RunTimelinePage";
+import { BusinessAgentShowcasePage } from "./pages/BusinessAgentShowcasePage";
 import { EvaluationJobsPage } from "./pages/EvaluationJobsPage";
 import { EvaluationJobDetailPage } from "./pages/EvaluationJobDetailPage";
 import { CreateEvaluationJobPage } from "./pages/CreateEvaluationJobPage";
+import { AdapterStudioPage } from "./pages/AdapterStudioPage";
 import { ExperimentDetailPage } from "./pages/ExperimentDetailPage";
 
 /** @returns Existing dashboard routes and asynchronous evaluation management routes. */
@@ -94,10 +96,7 @@ function App() {
         <Route
           path="comparison"
           element={
-            <PlaceholderPage
-              title="Comparison"
-              description="Compare baseline and candidate experiments."
-            />
+            <BusinessAgentShowcasePage />
           }
         />
 
@@ -118,6 +117,7 @@ function App() {
             <RunExperimentPage />
           }
         />
+        <Route path="adapter-studio" element={<AdapterStudioPage />} />
         <Route path="evaluation-jobs" element={<EvaluationJobsPage />} />
         <Route path="evaluation-jobs/new" element={<CreateEvaluationJobPage />} />
         <Route path="evaluation-jobs/:jobId" element={<EvaluationJobDetailPage />} />

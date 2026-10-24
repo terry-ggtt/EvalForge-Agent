@@ -5,6 +5,7 @@ import {
 
 
 const navigation = [
+  { label: "Adapter Studio", path: "/adapter-studio" },
   {
     label: "Dashboard",
     path: "/",
@@ -22,7 +23,7 @@ const navigation = [
     path: "/runs",
   },
   {
-    label: "Comparison",
+    label: "Agent Showcase",
     path: "/comparison",
   },
   {

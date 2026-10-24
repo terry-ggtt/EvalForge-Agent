@@ -1,3 +1,4 @@
+from app.adapters.intelligent.published import bind_published_runner, METRIC_SEMANTICS
 
 import logging
 
@@ -50,7 +51,10 @@ class EvaluationJobExecutor:
         job_store: EvaluationJobStore,
         experiment_service: ExperimentService,
         harness_runner: HarnessRunner,
+        adapter_registry=None,
     ):
+        """Keep job_store/experiment_service/base harness_runner and optional adapter_registry; no per-case model work."""
+        self.adapter_registry = adapter_registry
         self.job_store = job_store
         self.experiment_service = experiment_service
         self.harness_runner = harness_runner
@@ -245,6 +249,10 @@ class EvaluationJobExecutor:
                 metadata={
                     **payload.metadata,
                     "evaluation_job_id": job.job_id,
+                    **({"intelligent_adapter": {
+                        "adapter_id": payload.adapter_id, "adapter_version": payload.adapter_version,
+                        "mapping_digest": payload.adapter_mapping_digest, "metric_semantics": METRIC_SEMANTICS,
+                    }} if payload.adapter_id is not None else {}),
                 },
             )
         )
@@ -420,6 +428,8 @@ class EvaluationJobExecutor:
                 attempt_count=attempt_count,
             )
 
+            job_runner = await bind_published_runner(self.harness_runner, job, self.adapter_registry)
+
             # -------------------------------------------------
             # Step 2: Load committed Case Checkpoints
             # -------------------------------------------------
@@ -481,6 +491,14 @@ class EvaluationJobExecutor:
                     attempt_count=attempt_count,
                 )
 
+                if job.payload.adapter_id is not None:
+                    persisted = await self.experiment_service.run_store.get(checkpoint["run_id"])
+                    binding = persisted.metadata.get("intelligent_adapter", {}) if persisted else {}
+                    if any(binding.get(key) != expected for key, expected in {
+                        "adapter_id": job.payload.adapter_id, "adapter_version": job.payload.adapter_version,
+                        "mapping_digest": job.payload.adapter_mapping_digest,
+                    }.items()):
+                        raise RuntimeError("Checkpoint mapping binding does not match immutable Job")
                 await self._ensure_run_linked(
                     experiment_id=experiment_id,
                     run_id=checkpoint["run_id"],
@@ -531,7 +549,7 @@ class EvaluationJobExecutor:
                 # Execute one Case through existing Harness
                 # ---------------------------------------------
 
-                report = await self.harness_runner.run(
+                report = await job_runner.run(
                     [case]
                 )
 

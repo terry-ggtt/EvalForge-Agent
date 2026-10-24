@@ -1,3 +1,4 @@
+from app.harness.metric_semantics import ensure_metric_semantics
 import asyncio
 
 from collections import (
@@ -66,7 +67,7 @@ class DatasetComparisonService:
         baseline_run_ids: list[str],
         candidate_run_ids: list[str],
     ) -> DatasetComparisonReport:
-
+        """Compare baseline_run_ids/candidate_run_ids using persisted canonical metrics; reject mapped pipeline failures."""
         baseline_records = (
             await self._load_records(
                 baseline_run_ids,
@@ -80,6 +81,8 @@ class DatasetComparisonService:
                 side="candidate",
             )
         )
+
+        ensure_metric_semantics([*baseline_records, *candidate_records])
 
         baseline_by_case = (
             self._index_by_case(

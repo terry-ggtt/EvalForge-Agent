@@ -1,4 +1,5 @@
 import asyncio
+from app.adapters.errors import MappingFailure
 from collections.abc import Iterable
 from copy import deepcopy
 
@@ -68,7 +69,16 @@ class HarnessRunner:
             RetryDecider | None = None,
         run_store:
             RunStore | None = None,
+        execution_metadata: dict | None = None,
     ):
+        """Keep adapter/evaluators, policy/retry options, run_store and server execution_metadata.
+
+        Returns None; creates no external state. execution_metadata is copied and
+        reserved for explicitly bound jobs; unbound construction remains compatible.
+        """
+        self.execution_metadata = deepcopy(execution_metadata or {})
+        if self.execution_metadata.get("intelligent_adapter"):
+            self.execution_metadata["mapping_artifact_ids"] = []
         if not evaluators:
             raise ValueError(
                 "At least one evaluator "
@@ -106,7 +116,7 @@ class HarnessRunner:
             TestCase | dict
         ],
     ) -> EvaluationReport:
-
+        """Run dataset cases with configured concurrency; return report, unknown average for mapped pipeline failures."""
         cases = [
             (
                 raw_case
@@ -186,7 +196,7 @@ class HarnessRunner:
             in results
         ]
 
-        average_score = (
+        average_score = None if any(score is None for score in scored_results) else (
             sum(
                 scored_results
             )
@@ -211,14 +221,13 @@ class HarnessRunner:
         self,
         case: TestCase,
     ) -> CaseResult:
-
+        """Execute case through agent/mapping/evaluation, persist run, return typed failure without fake mapped score."""
         context = (
             RunContext.create(
                 case_id=
                     case.id,
 
-                metadata=
-                    case.metadata,
+                metadata={**case.metadata, **deepcopy(self.execution_metadata)},
             )
         )
 
@@ -327,6 +336,11 @@ class HarnessRunner:
                 else 0.0
             )
 
+            if self.execution_metadata.get("intelligent_adapter") and (
+                not scored_metrics or any(metric.details.get("quality_score_unverified") for metric in metric_results)
+            ):
+                score = None
+
             result = CaseResult(
                 run_id=
                     context.run_id,
@@ -363,6 +377,13 @@ class HarnessRunner:
             return result
 
         except Exception as exc:
+            bound = bool(self.execution_metadata.get("intelligent_adapter"))
+            failure_kind = ("evaluation" if stage == "evaluation" else
+                            "mapping" if isinstance(exc, MappingFailure) else "agent_execution")
+            if bound:
+                context.metadata["failure_kind"] = failure_kind
+                if failure_kind == "mapping":
+                    stage = "mapping"
 
             if isinstance(
                 exc,
@@ -514,8 +535,8 @@ class HarnessRunner:
                     else None
                 ),
 
-                score=
-                    0.0,
+                score=None if bound else 0.0,
+                failure_kind=failure_kind if bound else None,
 
                 trace=
                     context.trace.events,
@@ -567,7 +588,7 @@ class HarnessRunner:
         request: AgentRequest,
         context: RunContext,
     ) -> AgentResult:
-
+        """Run request/context with configured transient retries; MappingFailure always stops immediately."""
         policy = (
             self.retry_policy
         )
@@ -697,7 +718,7 @@ class HarnessRunner:
                     < policy.max_attempts
                 )
 
-                retryable = (
+                retryable = not isinstance(exc, MappingFailure) and (
                     self.retry_decider
                     .should_retry(
                         source
@@ -758,7 +779,7 @@ class HarnessRunner:
         result: CaseResult,
         context: RunContext,
     ) -> None:
-
+        """Persist case/result/context; mapped jobs atomically save private artifacts with the canonical RunRecord."""
         if self.run_store is None:
             return
 
@@ -775,9 +796,10 @@ class HarnessRunner:
             )
         )
 
-        await self.run_store.save(
-            record
-        )
+        if self.execution_metadata.get("intelligent_adapter"):
+            await self.run_store.save_with_mapping_artifacts(record, context.mapping_artifacts)
+        else:
+            await self.run_store.save(record)
 
     @staticmethod
     def _unwrap_agent_error(

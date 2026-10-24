@@ -1,3 +1,4 @@
+from psycopg import AsyncConnection
 from typing import Any
 
 from psycopg.rows import (
@@ -117,8 +118,9 @@ class PostgresRunStore(
     async def save(
         self,
         record: RunRecord,
+        *, connection: AsyncConnection | None = None,
     ) -> None:
-
+        """Save record, optionally using caller transaction connection; return None, preserve legacy SQL/upsert behavior."""
         query = """
         INSERT INTO harness_runs (
             run_id,
@@ -209,14 +211,11 @@ class PostgresRunStore(
             ),
         )
 
-        async with (
-            self._pool.connection()
-        ) as conn:
-
-            await conn.execute(
-                query,
-                params,
-            )
+        if connection is not None:
+            await connection.execute(query, params)
+        else:
+            async with self._pool.connection() as conn:
+                await conn.execute(query, params)
 
     async def get(
         self,
@@ -581,3 +580,14 @@ class PostgresRunStore(
                 or {}
             ),
         )
+    async def save_with_mapping_artifacts(self, record: RunRecord, artifacts: list[dict]) -> None:
+        """Atomically save canonical record plus private raw/normalized artifacts; rollback all on any insertion failure."""
+        async with self._pool.connection() as conn, conn.transaction():
+            await self.save(record, connection=conn)
+            for artifact in artifacts:
+                await conn.execute("""
+                    INSERT INTO harness_mapping_artifacts
+                    (artifact_id,run_id,attempt_id,job_id,adapter_id,adapter_version,mapping_digest,artifact_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(artifact_id) DO NOTHING
+                    """, (artifact["artifact_id"], record.run_id, artifact["attempt_id"], artifact["job_id"],
+                          artifact["adapter_id"], artifact["adapter_version"], artifact["mapping_digest"], Jsonb(artifact)))

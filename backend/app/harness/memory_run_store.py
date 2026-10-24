@@ -1,3 +1,4 @@
+from copy import deepcopy
 import asyncio
 
 from datetime import (
@@ -31,6 +32,7 @@ class InMemoryRunStore(
             RunRecord,
         ] = {}
 
+        self._mapping_artifacts: dict[str, list[dict]] = {}
         self._lock = (
             asyncio.Lock()
         )
@@ -244,3 +246,15 @@ class InMemoryRunStore(
                 tzinfo=timezone.utc
             )
         )
+    async def save_with_mapping_artifacts(self, record: RunRecord, artifacts: list[dict]) -> None:
+        """Save record and copied private artifacts under one in-memory lock; return None without public metadata leakage."""
+        snapshot = record.model_copy(deep=True)
+        copied = deepcopy(artifacts)
+        async with self._lock:
+            self._records[record.run_id] = snapshot
+            self._mapping_artifacts[record.run_id] = copied
+
+    async def mapping_artifacts(self, run_id: str) -> list[dict]:
+        """Return isolated artifact copies for run_id for local tests; production access uses protected Registry API."""
+        async with self._lock:
+            return deepcopy(self._mapping_artifacts.get(run_id, []))
