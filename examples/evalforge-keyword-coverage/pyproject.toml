@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalforge-keyword-coverage"
+version = "0.1.0"
+description = "Independent SDK-only keyword coverage evaluator for EvalForge"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["evalforge-evaluator-sdk>=0.3,<0.4"]
+
+[project.entry-points."evalforge.evaluators"]
+keyword_coverage = "evalforge_keyword_coverage:KeywordCoverageEvaluator"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

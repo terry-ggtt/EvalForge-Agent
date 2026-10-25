@@ -170,7 +170,8 @@ async def bind_published_runner(
     return HarnessRunner(
         adapter=adapter, evaluators=[EvidenceAwareEvaluator(item) for item in runner.evaluators],
         policy=runner.policy, retry_policy=runner.retry_policy, retry_decider=runner.retry_decider,
-        run_store=runner.run_store,
+        run_store=runner.run_store, evaluator_catalog=runner.evaluator_catalog,
+        evaluator_execution=runner.evaluator_execution, evaluation_identity=runner.evaluation_identity,
         execution_metadata={"intelligent_adapter": adapter.binding, "evaluation_job_id": job.job_id,
                             "evaluation_job_attempt": job.attempt_count},
     )

@@ -1,3 +1,6 @@
+from app.api.evaluators import router as evaluators_router, evaluator_selection_error
+from app.evaluator.contracts import EvaluatorSelectionError
+
 from app.api.adapter_registry import (
     router as adapter_registry_router, registry_lifespan, registry_error_handler,
 )
@@ -180,6 +183,7 @@ async def lifespan(
                 experiment_service
             )
 
+            app.state.evaluator_catalog = harness_runner.evaluator_catalog
             app.state.harness_runner = (
                 harness_runner
             )
@@ -246,6 +250,8 @@ def create_app() -> FastAPI:
     from app.api.showcase import router as showcase_router
     application.include_router(showcase_router)
 
+    application.include_router(evaluators_router)
+    application.add_exception_handler(EvaluatorSelectionError, evaluator_selection_error)
     application.include_router(adapter_registry_router)
     application.add_exception_handler(RegistryError, registry_error_handler)
 

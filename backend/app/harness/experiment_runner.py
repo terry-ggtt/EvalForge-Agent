@@ -1,3 +1,5 @@
+from app.evaluator.contracts import EvaluatorSelection
+
 import asyncio
 
 from typing import (
@@ -94,8 +96,20 @@ class ExperimentRunner:
             dict[str, Any]
             | None
         ) = None,
+        evaluators: list[EvaluatorSelection] | None = None,
     ) -> EvaluationExperiment:
+        """Run cases under name/dataset_version/agent_version using the existing Experiment lifecycle.
 
+        model_name/prompt_version and metadata retain their existing meaning.
+        Optional evaluators binds a task-local plan before Experiment creation,
+        then supplies the known Experiment identity to SDK contexts. Returns the
+        completed experiment; orchestration errors/cancellation still fail it and
+        propagate. Per-evaluator failures remain persisted Case outcomes.
+        """
+        runner = self.harness_runner
+        if evaluators is not None:
+            runner = self.harness_runner.with_evaluators(evaluators)
+            metadata = {**(metadata or {}), "evaluator_plan": runner.evaluator_execution.summary}
         experiment = (
             await self
             .experiment_service
@@ -120,11 +134,12 @@ class ExperimentRunner:
             )
         )
 
+        if evaluators is not None:
+            runner.evaluation_identity = {"experiment_id": experiment.experiment_id}
         try:
 
             report = (
-                await self
-                .harness_runner
+                await runner
                 .run(
                     cases
                 )

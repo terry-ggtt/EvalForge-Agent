@@ -4,6 +4,7 @@ from typing import (
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     model_validator,
 )
@@ -19,6 +20,7 @@ MetricGateTarget = Literal[
     "score_delta_mean",
     "value_delta_mean",
     "relative_value_delta",
+    "relative_score_delta",
 ]
 
 
@@ -52,9 +54,17 @@ class MetricGateRule(
 
     target: MetricGateTarget
 
-    operator: GateOperator
+    model_config = ConfigDict(allow_inf_nan=False)
+    operator: GateOperator | None = None
 
     threshold: float
+
+    @model_validator(mode="after")
+    def validate_automatic_tolerance(self) -> "MetricGateRule":
+        """Require this direction-inferred tolerance to be nonnegative; explicit signed limits remain valid."""
+        if self.operator is None and self.threshold < 0:
+            raise ValueError("Automatic direction requires a nonnegative tolerance")
+        return self
 
 
 class RegressionGatePolicy(
@@ -65,6 +75,7 @@ class RegressionGatePolicy(
     ExperimentComparisonReport.
     """
 
+    model_config = ConfigDict(allow_inf_nan=False)
     max_regression_rate: float = Field(
         default=0.05,
         ge=0.0,

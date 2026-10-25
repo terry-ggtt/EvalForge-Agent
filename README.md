@@ -1,677 +1,401 @@
+<div align="center">
+
 # EvalForge · Agent Evaluation Harness
 
-### 让 Agent 的版本迭代，有可追溯的评测证据与可执行的发布标准。
+**面向 AI Agent 与 RAG 的可扩展评测、执行证据与回归门禁平台**
 
-EvalForge 是一个面向 AI Agent 的评测与回归测试平台。它将异构 Agent 的响应和执行轨迹，转换为统一的评测结果，再通过持久化任务、实验对比与质量门禁，回答三个工程问题：
+从异构 Agent 接入，到插件化指标、可恢复实验与版本回归，建立完整的评测工程闭环。
 
-> **新版本是否更好？变化发生在哪一步？这些结论能否追溯到原始执行证据？**
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)
 
-项目已实现从 **Agent 接入 → 异步评测 → Trace 与指标持久化 → Experiment 对比 → Regression Gate** 的后端链路，以及 **Adapter Studio：样本分析 → AI 规则生成 → 确定性预览 → 三层验证 → 人工审核发布** 的管理闭环。
+[架构设计](#系统架构) · [核心能力](#六项核心工程能力) · [端到端证据](#真实端到端验证) · [本地运行](docs/GETTING_STARTED.md) · [开发插件](docs/extending-evaluators.md) · [源码导读](#源码导读)
 
-当前定位为具有真实数据库、独立 Worker 和前端操作界面的工程实践项目，已验证本地 / WSL 部署及独立业务 Agent 接入。生产部署仍需补齐统一身份、依赖锁定、数据保留和容量验证。
-
-[核心设计](#核心工程设计) · [系统架构](#系统架构) · [运行项目](#运行项目) · [演示路径](#建议的演示路径) · [测试证据](#测试与验证证据) · [源码导读](#源码导读)
+</div>
 
 ---
 
-## 先看项目已经解决了什么
+## 项目解决什么问题
 
-| 工程问题 | 当前实现 | 可检查的证据 |
-| --- | --- | --- |
-| 不同 Agent 的回答、工具调用和 Trace 格式不一致 | 统一 Contracts + Adapter；可版本化的 Response / Trace Mapping | [AgentAdapter](backend/app/adapters/base.py)、[MappingSpec](backend/app/adapters/intelligent/contracts.py) |
-| 长评测不能依赖 HTTP 请求进程存活 | PostgreSQL 持久化队列、独立 Worker、Lease / Heartbeat、Case Checkpoint | [JobStore](backend/app/jobs/postgres_store.py)、[Executor](backend/app/jobs/executor.py) |
-| 改了 Prompt 或检索策略，却无法判断是否退化 | 按 Case 匹配实验，聚合指标变化，执行回归与门禁规则 | [ExperimentComparisonService](backend/app/harness/experiment_comparison_service.py)、[RegressionGate](backend/app/harness/regression_gate_service.py) |
-| AI 生成的适配规则可能结构合法、语义错误 | 严格 DSL、确定性 Runtime、拓扑检查、独立 Golden、显式人工审核 | [Validator](backend/app/adapters/intelligent/validator.py)、[Registry](backend/app/registry/postgres_store.py) |
-| 任务执行中规则被更新，影响历史结果解释 | Job 固定 adapter_id / version / digest，Worker 读取确切发布快照 | [Published Adapter](backend/app/adapters/intelligent/published.py)、[v015](backend/migrations/v015_pinned_mapping_evaluation.sql) |
-| 看到了低分，却无法区分 Agent、适配层和评测器故障 | 故障分类、未知证据保留 null、Raw / Normalized 关联、可查看的 Trace Timeline | [Runner](backend/app/harness/runner.py)、[指标语义](backend/app/harness/metric_semantics.py)、[Studio](frontend/src/pages/AdapterStudioPage.tsx) |
+Agent 的一次升级，可能同时改变 Prompt、模型、检索策略、工具调用和输出格式。回答更流畅，并不意味着检索更准确、工具更可靠或成本更低。缺少统一评测与执行证据时，版本决策很容易退回到人工试问和主观判断。
 
-**默认 Demo 流程无需模型 API Key。** 真实业务 Agent 和 AI Mapping Generation 是显式启用的独立路径，可能产生模型调用费用。
+**EvalForge 将 Agent 迭代组织成可检查的工程流程：**
 
-## 为什么需要这样一套系统
+```text
+接入 Agent → 执行 Dataset → 保存 Trace 与指标 → 对齐 Baseline / Candidate → 回归检测 → 质量门禁
+```
 
-最初可以写一个脚本，循环调用 Agent，再检查最终答案。接入更多 Agent、增加工具调用和版本比较后，会依次遇到新的问题：
+项目围绕真实工程中的三个难点展开：
 
-| 演进 | 暴露的问题 | EvalForge 的对应设计 |
-| --- | --- | --- |
-| 单次回答检查 → 多维评测 | 答案看似正确，但工具、参数、引用或成本可能有问题 | 拆分 Evaluator，将原始测量 value 与质量 score 分开 |
-| 临时脚本 → 批量实验 | 进程中断后结果丢失，难以匹配前后版本 | Run / Experiment 持久化、稳定 Case 身份、实验对比 |
-| HTTP 内执行 → 独立任务 | 请求超时、Worker 重启、并发领取和旧进程写回 | 数据库队列、Lease、Heartbeat、fencing 条件与 Checkpoint |
-| 手工 Adapter → 智能规则生成 | 每种响应都写代码成本高，模型生成又存在不确定性 | AI 在配置阶段生成 DSL，评测时执行固定规则 |
-| 可用规则 → 可发布规则 | JSON 合法无法证明业务语义正确 | 三层验证、独立 Golden、证据摘要绑定、人工审核与事务发布 |
+- **接入难：** 用受约束的 Mapping DSL 统一异构 Response / Trace，AI 负责生成候选，正式评测执行固定规则。
+- **扩展难：** 将评测能力做成独立 SDK 与第三方插件，新增指标通过安装和服务端授权接入。
+- **信任难：** 将任务归属、版本、原始证据、指标语义和 Gate 判定关联起来，让每个结果有解释依据。
 
-这些设计共同服务于一个目标：**一次评测的输入、执行、标准化、评分与版本判断，都有明确的数据契约和证据关联。**
+| 已实现的工程闭环 | 可直接检查的证据 |
+| --- | --- |
+| **异构数据 → AI 生成 → 验证 → 人工审核 → 固定版本执行** | [Intelligent Adapter System](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) |
+| **独立插件包 → 真实安装 → Entry Points → API 选择 → 持久化 → Gate** | [第三方插件 E2E](docs/plans/evaluator-plugin-stage6.md) |
+| **持久化 Job → 多 Worker 领取 → Lease / Heartbeat → Checkpoint 恢复** | [执行器](backend/app/jobs/executor.py) · [PostgreSQL JobStore](backend/app/jobs/postgres_store.py) |
+| **React Studio → 样本分析 → Mapping 预览 → 三层验证 → 审核发布** | [Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md) |
+
+**最近一次完整 Python 回归：852 项实际执行，851 通过、1 项既有失败、0 跳过。** 包含真实 PostgreSQL、SDK / Registry / Loader 与独立插件测试。[查看范围与已知失败](#测试与验证)
 
 ## 系统架构
 
-系统分为管理与生成链路、评测执行链路。两者使用独立任务表与 Worker；正式 Case 评测不调用 Mapping Agent。
+系统以统一契约为中心，将配置生成、评测执行和结果决策分开组织。
 
 ```mermaid
 flowchart TB
-    UI["React / TypeScript 前端"]
-    API["FastAPI"]
+    UI["React / TypeScript · Adapter Studio / Jobs / Replay"]
+    API["FastAPI · 管理 / 评测 / 查询 API"]
     UI --> API
 
-    subgraph Studio["管理与生成链路"]
-        Samples["Profile / JSON 样本"]
-        Inspector["Schema Inspector"]
-        GQ["PostgreSQL 生成任务"]
-        GW["独立 Mapping Worker"]
-        AI["LLM 结构化生成 / 有界修复"]
-        Validator["Runtime + 三层 Validator / Golden"]
-        Review["人工审核 + 事务发布"]
-        Versions["不可变 Published Mapping Version"]
-        Samples --> Inspector --> GQ --> GW --> AI --> Validator --> Review --> Versions
+    subgraph Control["适配规则治理"]
+        Samples["Raw Response / Trace 样本"]
+        Inspect["Schema Inspector / Fingerprint"]
+        Generate["独立 Mapping Worker / LLM 结构化生成"]
+        Validate["确定性预览 / L1-L3 验证 / Golden Tests"]
+        Publish["人工审核 / 事务发布 / 不可变版本"]
+        Samples --> Inspect --> Generate --> Validate --> Publish
     end
 
-    subgraph Evaluation["评测执行链路"]
-        JQ["PostgreSQL Evaluation Job"]
-        EW["独立 Evaluation Worker"]
-        Runner["Executor / HarnessRunner"]
-        Adapter["Agent Adapter / 原 HTTP 调用"]
-        Agent["本地 / LangGraph / 业务 HTTP Agent"]
-        Mapping["可选：固定版本 Deterministic Mapping"]
-        Metrics["统一 AgentResult / TraceEvent → Evaluators"]
-        Evidence["Run / Trace / Raw 关联产物 / Checkpoint"]
-        Comparison["Experiment → Comparison → Regression Gate"]
-        JQ --> EW --> Runner --> Adapter --> Agent
-        Agent --> Mapping --> Metrics --> Evidence --> Comparison
+    subgraph Execute["评测执行"]
+        Jobs["PostgreSQL Job Queue"]
+        Worker["Evaluation Worker / Lease / Heartbeat"]
+        Runner["统一 HarnessRunner / Case Checkpoint"]
+        Agent["Local / LangGraph / Business HTTP Agent"]
+        Normalize["可选：固定版本 Mapping Runtime"]
+        Evaluate["内置 / 第三方 Evaluators"]
+        Jobs --> Worker --> Runner --> Agent --> Normalize --> Evaluate
+    end
+
+    subgraph Plugins["评测扩展"]
+        SDK["公开 Evaluator SDK"]
+        EP["已安装插件 / Entry Points"]
+        Registry["Allowlist / Registry / 固定执行计划"]
+        SDK --> EP --> Registry
     end
 
     API --> Samples
-    API --> JQ
-    Versions -. "显式固定版本" .-> Mapping
-    Evidence --> Replay["Replay Timeline / 证据查看"]
+    API --> Jobs
+    Publish -. "Job 固定版本" .-> Normalize
+    Registry --> Evaluate
+    Evaluate --> Store["PostgreSQL · Run / Trace / Metric / 原始关联产物"]
+    Store --> Replay["Replay Timeline / 证据定位"]
+    Store --> Compare["ExperimentComparison / RegressionDetector"]
+    Compare --> Gate["Regression Gate / 逐规则解释"]
     Replay --> UI
-    Comparison --> API
+    Gate --> API
 ```
 
-- **PostgreSQL 同时承担业务持久化与任务队列**，任务领取使用 `FOR UPDATE SKIP LOCKED`；当前执行链路没有 Redis、Celery 或外部消息队列。
-- **Runner 编排生命周期，Adapter 隔离调用差异，Evaluator 计算指标**。外部框架变化不应扩散到每个评测器。
-- **Replay 读取已保存的 Trace**，不重新调用 Agent，也不按当前 Mapping 重算历史结果。
-- **Mapping Runtime 确定性只针对固定输入与规则**。真实 Agent 的模型输出、外部数据和网络仍可能变化。
+**一个 Runner，三种职责边界：** Adapter 负责调用与标准化，Evaluator 负责指标，Runner 负责生命周期、并发、重试和保存。插件与智能适配都接入现有数据流，比较和门禁共享同一套指标语义。
 
-## 核心工程设计
+## 六项核心工程能力
 
-### 1. 用统一契约隔离 Agent 框架
+### 1. Intelligent Adapter：把异构接入变成可治理的规则
 
-实际的 Adapter 边界是：
+不同 Agent 将答案放在不同字段，Trace 也可能采用完全不同的事件名和嵌套结构。EvalForge 将接入过程做成独立的配置治理链路：
 
-```python
-async def run(
-    self,
-    request: AgentRequest,
-    context: RunContext,
-) -> AgentResult:
-    ...
+```text
+多个 JSON 样本
+  → Schema Inspector：字段路径、类型、频率、nullable、结构差异、稳定指纹
+  → Mini Mapping Agent：结构化 MappingSpec、来源证据、不确定性
+  → Runtime / Validator：执行预览、结构校验、拓扑校验、独立 Golden
+  → 有界修复 / needs_manual_review
+  → 人工审核 / 事务发布
+  → Evaluation Job 固定已发布版本
 ```
 
-| 契约 | 职责 |
+- **受约束 DSL：** extract、rename、enum_map、cast、coalesce、sum_if_present；严格 Pydantic 模型，可存为 JSONB。
+- **确定性执行：** 正式 Case 评测不调用 Mapping Agent，不执行模型生成的 Python；固定输入和规则得到固定映射结果。
+- **保留未知：** 字段缺失、显式 null、类型错误与转换失败分别表达；未知 Span、时间和 Token 不补造。
+- **控制生成成本：** 明确披露的样本摘要、调用预算、超时、结构化错误反馈与有界修复。
+- **版本治理：** Job 固定 adapter_id / version / digest；中途发布新规则不会改变正在执行的任务。
+
+**工程选择：将 AI 的不确定性留在候选生成阶段，将正式执行约束在已验证的声明式规则中。**
+
+[DSL](backend/app/adapters/intelligent/contracts.py) · [Runtime](backend/app/adapters/intelligent/runtime.py) · [Inspector](backend/app/adapters/intelligent/inspector.py) · [发布集成](backend/app/adapters/intelligent/published.py)
+
+### 2. 插件化评测引擎：新增指标可独立打包、安装和发布
+
+评测器实现统一异步 SDK 协议，宿主保留执行、错误处理与持久化控制权。
+
+| 层次 | 已实现能力 |
 | --- | --- |
-| TestCase | 数据集身份、输入、期望输出、期望工具调用、案例元数据 |
-| AgentRequest | 发送给 Adapter 的输入和元数据 |
-| AgentResult | 统一 output_text、trace、metadata |
-| TraceEvent | 统一事件类型、时间戳和 payload |
-| RunContext | 单次执行的 run_id、TraceCollector、计时和隔离的元数据 |
-| MetricResult | 指标名、原始测量值、单位、可选质量分和解释明细 |
-| CaseResult | 完整案例档案：实际输出、指标、Trace、错误与故障类别 |
+| **公开 SDK** | BaseEvaluator、EvaluatorManifest、EvaluationContext、MetricResult；独立安装，不依赖 FastAPI、数据库或 Runner |
+| **静态 Registry** | 按 evaluator_id 查询/创建、内置与第三方注册、协议/API 版本校验、重复 ID 拒绝 |
+| **Entry Points Loader** | 标准库安装元数据发现 → EntryPoint.load → 注册；分阶段记录状态与来源包 |
+| **服务端授权** | evaluator_id + 来源 distribution + 可选包版本允许列表；请求无法指定任意导入路径或安装命令 |
+| **动态执行** | 一个任务选择多个指标；每 Case / 每指标创建新实例，独立超时与异常、取消传播 |
+| **计划固定** | Job 保存 Manifest、来源版本、配置 Schema 与规范化配置；Worker / 恢复时复核 |
+| **结果兼容** | SDK 结果进入原 RunRecord / Store / 指标查询 / Comparison / Gate |
 
-TestCase 的参考答案留在评测侧；Runner 不将 expected_output 作为 AgentRequest 的标准字段发送给 Agent。案例元数据仍需调用方合理管理，不能主动放入答案等泄漏信息。
+真实示例包 [evalforge-keyword-coverage](examples/evalforge-keyword-coverage) 只依赖公开 SDK。安装后通过固定入口组发现：
 
-当前存在 LocalAgentAdapter、LangGraphAdapter、TracingDemoAdapter 和 BusinessHttpAdapter。发布 Mapping 的正式集成针对 **BusinessHttpAdapter 的响应标准化边界**，保留原 HTTP 请求体、认证和调用逻辑；它不自动发现任意第三方协议。
-
-源码：[Contracts](backend/app/harness/contracts.py) · [RunContext](backend/app/harness/context.py) · [Adapters](backend/app/adapters)
-
-### 2. 将“完成任务”和“质量通过”分开
-
-Evaluation Job 是持久化状态机：
-
-```text
-queued → running → completed / failed
-   │         │
-   │         ├─ 用户请求取消 → cancel_requested → cancelled / completed / failed
-   │         └─ Lease 过期 → 有界恢复 queued，或达到上限后 failed
-   └─ 执行前取消 → cancelled
+```toml
+[project.entry-points."evalforge.evaluators"]
+keyword_coverage = "evalforge_keyword_coverage:KeywordCoverageEvaluator"
 ```
 
-**Job completed 表示案例处理完毕，可能包含 failed_cases；质量是否通过由指标和 Gate 决定。**
-
-| 机制 | 解决的问题 | 实际保证范围 |
-| --- | --- | --- |
-| 原子领取 + SKIP LOCKED | 多 Worker 争抢同一任务 | 一个领取事务获得当前执行权 |
-| 独立 Heartbeat | 长 Case 执行时租约过期 | 持续续租；续租失败后不能假设仍拥有任务 |
-| worker_id + attempt_count + 有效 Lease 写入条件 | 旧 Worker 覆盖任务归属或进度 | 拒绝过期所有者更新 Job / Checkpoint |
-| Case Checkpoint | 重启后重复执行已经完成的案例 | 恢复已提交案例的 Run 引用并跳过已完成 Case |
-| Run 与 Raw 关联产物同事务保存 | 有规范结果却丢失原始证据 | 已提交 Run 与其私有产物一致落库 |
-
-单个 Worker 进程一次执行一个 Job；可运行多个 Worker。Runner 另有 Case 并发与超时策略。**Job 执行尝试与 Agent 的 Case 内重试是两层不同机制。**
-
-Run 与关联产物的事务、Case Checkpoint 与进度的事务是两个提交边界。Run 已保存但 Checkpoint 未提交时，可能留下未关联 Run；任务归属与恢复依据已提交的 Checkpoint。
-
-Checkpoint 不等于外部调用 exactly-once：Agent 已执行但 Case 尚未提交时，恢复可能重新发起请求。同步阻塞调用或不合作的协程也不具备进程级强制超时保证。
-
-源码：[Worker](backend/app/worker.py) · [Executor](backend/app/jobs/executor.py) · [JobStore](backend/app/jobs/postgres_store.py)
-
-### 3. AI 只生成候选，运行时只解释受限 DSL
-
-Intelligent Adapter System 的实际闭环：
-
-```text
-多个原始样本
-  → Schema Inspector：路径 / 类型 / 出现频率 / nullable / 结构差异 / 指纹
-  → 人工选择字段与必要标量披露
-  → Mini Mapping Agent：结构化 MappingSpec + 来源证据与不确定性
-  → 确定性 Runtime + Validator
-  → 有界修复，默认首次生成后最多修复 3 次
-  → Candidate / needs_manual_review
-  → 独立人工审核与发布
-  → Job 固定版本，逐 Case 执行确定性 Mapping
-```
-
-关键约束：
-
-- DSL 支持 `extract`、`rename`、`enum_map`、`cast`、`coalesce`、`sum_if_present`，使用严格 Pydantic 契约，可序列化为 JSONB。
-- JSONPath 限制为根、对象字段和非负数组索引，支持 JSON 引号键；不支持过滤表达式、切片或任意代码。
-- 明确区分字段不存在、显式 null、类型不符和转换失败；不修改原始输入，不补造 Span、时间或 Token。
-- Inspector 的数组归一化路径用于结构描述；它的 `[]` 不能直接当作 Runtime 的可执行通配符。
-- 模型上下文使用显式披露白名单；Raw 与 Golden 不整体发给模型。样本和字段说明作为不可信数据处理。
-- 超时、调用失败、格式错误和预算消耗均有终止条件；没有无限修复或自动发布。
-- 不执行模型生成的 Python，不提供 eval / exec / 动态代码导入执行通道。
-
-例如，供应商将答案写在 answer，并将 Span 信息嵌入事件的 span 对象。可以将它映射回已有 AgentResult / TraceEvent，无需再造一套规范结果模型：
+创建任务时显式选择：
 
 ```json
 {
-  "spec_version": "1.0",
-  "name": "vendor-response-v1",
-  "response": {
-    "fields": [
-      {
-        "target": "$.output_text",
-        "operation": { "op": "extract", "path": "$.answer" },
-        "value_type": "string",
-        "on_missing": "error",
-        "on_null": "error"
-      }
-    ]
-  },
-  "trace": {
-    "events_path": "$.events",
-    "type_path": "$.kind",
-    "on_unknown_event": "error",
-    "rules": [
-      {
-        "source_type": "model",
-        "event_type": "model_result",
-        "fields": [
-          {
-            "target": "$.timestamp",
-            "operation": { "op": "extract", "path": "$.finished" },
-            "value_type": "datetime",
-            "on_missing": "error",
-            "on_null": "error"
-          },
-          {
-            "target": "$.payload",
-            "operation": { "op": "extract", "path": "$.span" },
-            "value_type": "object",
-            "on_missing": "error",
-            "on_null": "error"
-          }
-        ]
-      }
-    ]
-  }
+  "evaluators": [
+    {"evaluator_id":"keyword_coverage","config":{},"timeout_seconds":30}
+  ]
 }
 ```
 
-Response 路径相对完整响应；type_path 和事件字段路径相对单个事件。上述规则要求真实的带时区 finished 时间以及 span 对象；缺失时返回错误，不用当前时间补齐。这份规则是否正确表达业务语义，还必须由独立 Golden 验证。
+**工程选择：插件作者维护评分算法，平台统一维护执行契约、来源证据和发布决策。** 未显式选择插件时，原内置评测流程保持兼容。
 
-源码：[DSL](backend/app/adapters/intelligent/contracts.py) · [Runtime](backend/app/adapters/intelligent/runtime.py) · [Inspector](backend/app/adapters/intelligent/inspector.py) · [生成服务](backend/app/adapters/intelligent/generation_service.py)
+[SDK 源码](packages/evaluator-sdk) · [开发者指南](docs/extending-evaluators.md) · [动态执行](backend/app/evaluator/execution.py)
 
-### 4. 把“合法配置”和“可信规则”分成三层验证
+内置与可扩展指标覆盖多个维度，任务按需组合：
 
-| 层次 | 检查内容 | 不能据此推断的结论 |
+| 维度 | 指标与证据 |
+| --- | --- |
+| 回答与要点 | Keyword Match、独立插件 Keyword Coverage；基于明确参考，保留命中解释 |
+| 工具行为 | 工具准确率、效率与参数匹配，检查实际调用轨迹 |
+| 效率与成本 | Latency、Token Usage、Cost / PricingCatalog；缺证据不猜测 |
+| RAG 检索 | Recall@5、MRR@5；依赖人工参考来源标注 |
+| 引用与拒答 | citation_recall、citation_grounding、abstention；采用明确的来源与行为规则 |
+
+
+### 3. 持久化异步执行：让长评测具备恢复路径
+
+评测任务以 PostgreSQL 作为持久化队列，API 创建任务，独立 Worker 执行。长评测的生命周期由数据库状态承载。
+
+| 机制 | 对应工程问题 |
+| --- | --- |
+| FOR UPDATE SKIP LOCKED 原子领取 | 多 Worker 并发竞争任务 |
+| Lease + 独立 Heartbeat | 长 Case 执行期间维持归属、识别失联 Worker |
+| worker_id + attempt_count + 有效租约条件 | 拒绝过期 Worker 写回任务进度 |
+| Case Checkpoint | 重启后复用已提交结果，跳过已完成 Case |
+| 有界恢复 / 取消传播 | 明确失败、恢复与停止条件 |
+| Run 与 Raw 关联产物事务保存 | 规范化结果与原始证据一致落库 |
+
+Job 的 completed 表示 Case 已处理完毕；质量是否达标由 Gate 判断。单个 Worker 一次执行一个 Job，Runner 另有 Case 并发控制。
+
+**工程选择：使用 PostgreSQL 事务统一任务状态与执行所有权，减少队列与业务存储之间的协调成本。** 当前不依赖 Redis / Celery；Checkpoint 也不承诺外部 Agent 副作用 exactly-once。
+
+[Worker](backend/app/worker.py) · [Executor](backend/app/jobs/executor.py) · [JobStore](backend/app/jobs/postgres_store.py)
+
+### 4. 证据优先：从汇总分数追到具体执行
+
+每次执行保留 Case、Run、Attempt、指标与 Trace 的关联。启用智能适配时，原始事件还可通过 raw_pointer 追溯到规范化事件。
+
+- **Replay Timeline：** 读取已保存的执行轨迹，查看模型、工具、重试与错误事件；不重新调用 Agent。
+- **Raw / Normalized 关联：** 能检查“原始数据是什么、规则如何解释、评测使用了什么”。
+- **故障分类：** Agent execution、Mapping、Evaluation failure 分开表达。
+- **错误隔离：** 单个插件失败不丢失其他指标；新动态/发布适配路径使用未知质量，避免将评测故障伪装成低质量回答。
+- **计量与质量分离：** value 保留原始测量和单位，score 表示归一化质量；缺失 usage / 定价不伪造成本。
+
+**工程选择：让故障与低质量拥有不同的数据表达，保证后续比较和门禁能够解释结果。**
+
+[RunRecord](backend/app/harness/run_record.py) · [Replay](backend/app/harness/replay.py) · [指标语义](backend/app/harness/metric_semantics.py)
+
+### 5. Regression Gate：把版本比较落实为可执行标准
+
+Baseline / Candidate 复用原 ExperimentComparison、RegressionDetector 和 MetricGateRule。
+
+| 比较要素 | 处理方式 |
+| --- | --- |
+| **案例身份** | 按稳定 Case ID 对齐，保留缺失集合，拒绝重复身份 |
+| **指标身份** | 按 metric_name 匹配，并核对生产者及输出身份 |
+| **可比性** | 校验插件计划、版本、配置、单位与声明的统计口径；不一致返回不可比 |
+| **方向** | score 始终越高越好；原始 value 使用 Manifest.direction |
+| **容忍度** | 支持原单位的绝对变化与相对 Baseline 的比例变化 |
+| **证据完整性** | 空对齐、缺失指定指标、部分观测、无效数值和零相对基准不会误判 PASS |
+| **输出解释** | 每条 finding 包含 evaluable、actual、threshold、passed 与原因 |
+
+已验证的典型判定：
+
+| 场景 | 允许退化 | 结果 |
 | --- | --- | --- |
-| L1：结构 | MappingSpec / 输出契约、类型、枚举、时间格式、重复 Span ID | 字段含义一定正确 |
-| L2：拓扑 | 父 Span 引用、父子环、明显时间矛盾；允许合法并发 | Trace 已完整覆盖业务过程 |
-| L3：语义 / Golden | 人工定义的期望输出、Span Type、Token Usage、Tool Call 等关键字段 | 对未见数据普遍正确 |
+| 高优指标 0.84 → 0.78 | 最大绝对下降 0.05 | **FAIL** |
+| 低优时延 1.2s → 1.5s | 最大增加 0.2s | **FAIL** |
+| Baseline 缺少指定指标 | 无充分证据 | **不可评估，阻断通过** |
+| 使用不同插件版本或配置 | 不满足可比性 | **HTTP 409** |
 
-当前拓扑检查按配置路径将一个映射事件解释为一条 Span 记录；原始 start/end 分散在多个事件时，不会自动合并，也不会补造缺失关系或时间。
+**工程选择：先确认可比，再计算退化；未发现退化不等于证据足够。** 原 Gate 继续联合检查逐 Case 回归率与聚合阈值。
 
-ValidationReport 分开输出 **error / warning / unverified** 和可执行的发布阻断原因。Partial Trace 的未知信息必须保留；没有独立 Golden 时，L3 不能宣称通过。Golden 来自人工期望，而非从当前预览反向复制。
+[Comparison](backend/app/harness/experiment_comparison_service.py) · [Gate](backend/app/harness/regression_gate_service.py) · [字段语义与测试](docs/plans/evaluator-plugin-stage5.md)
 
-发布时在一个 PostgreSQL 事务内锁定 Profile 和 Candidate，重新核对最新报告、样本/配置/规则摘要和人工审核记录，然后插入版本、递增版本计数并写审计。数据库唯一约束兜底并发；同一候选和审核的发布重试返回同一版本。
+### 6. Adapter Studio：把接入、验证与审核做成操作闭环
 
-Published Version 及关键证据通过触发器禁止修改/删除/清空；应用代码不能覆盖已发布规则。数据库所有者能够修改 DDL，因此该保证以合理的部署权限为前提。
-
-源码：[Validator](backend/app/adapters/intelligent/validator.py) · [Registry 发布事务](backend/app/registry/postgres_store.py) · [v014 约束](backend/migrations/v014_adapter_registry.sql)
-
-### 5. 固定规则版本，保留完整证据关联
+React / TypeScript 前端提供可用的规则治理工作台，复用 API Client、TanStack Query 与现有组件。
 
 ```text
-Evaluation Job.payload_json
-  └─ adapter_id + adapter_version + 服务端解析的 mapping_digest
-        ↓ Worker 按执行尝试加载确切已发布快照
-Business HTTP 原调用
-        ↓
-Raw Response → Deterministic Mapping → AgentResult / TraceEvent
-        ↓
-harness_runs：案例结果、标准化 Trace、公开关联 ID
-harness_mapping_artifacts：Raw 文本/字节、MappingResult、NormalizedResult
-        ↓
-Case Checkpoint → Experiment → Replay / Comparison / Gate
+创建 Profile → 上传样本 → 查看 Schema → 生成候选 → 映射关系
+→ Raw / Normalized 预览 → Validation Report → 语义确认 → 审核发布 → 历史版本 / 使用情况
 ```
 
-Job 执行中发布新版本，不会改变当前绑定；Worker 恢复也使用同一绑定。RunContext 的 run_id 标识执行，Case ID 标识数据集案例，attempt_id 标识 Case 内尝试，三者分工明确。
+发布前的三层验证：
 
-原始事件通过 Runtime 的 raw_pointer 与标准化事件关联，保留映射过程。受保护的 Raw 查询要求 Registry editor 权限；公开 Run 元数据不携带整份原始响应。
-
-源码：[PublishedBusinessHttpAdapter](backend/app/adapters/intelligent/published.py) · [v015 固定绑定与产物](backend/migrations/v015_pinned_mapping_evaluation.sql)
-
-### 6. 故障隔离和指标语义一致，比一个总分更重要
-
-启用已发布 Mapping 的链路区分：
-
-| failure_kind | 含义 | 质量解释 |
-| --- | --- | --- |
-| agent_execution | Agent 调用或业务执行失败 | 执行故障，不能直接解释为回答质量差 |
-| mapping | 原始响应无法可靠标准化 | 停止该案例评分，保留原始证据 |
-| evaluation | 评测器计算失败 | 评测流水线故障，不能生成可信质量结论 |
-
-这些流水线失败使用 `score=null`，不以零分混入 Agent 质量。该语义属于新的发布 Mapping 路径，未启用的历史流程保留兼容行为。
-
-未知 Token / 成本保留 unverified / null；Token、工具指标读取最后成功 Attempt 的 Agent 证据，Latency 保留 Harness 生命周期范围。计量型指标没有质量 score 时，不参与质量分平均。
-
-Comparison / Regression / Gate 复用 `harness-normalized/v1` 语义检查：拒绝将未知质量、流水线失败或混合的历史/新规范静默比较。固定规则版本提供可追溯性；可比性仍依赖相同案例、数据集约束和一致指标定义。
-
-源码：[EvidenceAwareEvaluator](backend/app/adapters/intelligent/published.py) · [metric_semantics](backend/app/harness/metric_semantics.py)
-
-## 指标与质量门禁
-
-评测器可组合，Runner 的具体指标由配置选择，并非每次运行自动启用所有指标。
-
-| 维度 | 当前实现 | 解释边界 |
-| --- | --- | --- |
-| 回答匹配 | KeywordMatchEvaluator | 关键词覆盖，不等同于语义正确性判定 |
-| 工具调用 | ToolAccuracyEvaluator / ToolEfficiencyEvaluator / 参数匹配器 | 根据期望工具、参数和执行证据判断 |
-| 时延 | LatencyEvaluator | 基于已有生命周期证据测量 |
-| Token / 费用 | TokenUsageEvaluator / CostEvaluator / PricingCatalog | 依赖实际 usage 与已配置价格，价格目录不是实时账单 |
-| 检索效果 | 业务 RAG 的 Recall@5 / MRR@5 | 依赖人工参考来源标注 |
-| 引用 | citation_recall / citation_grounding | 来源 ID 覆盖与精度，不证明逐句语义蕴含 |
-| 无答案行为 | abstention | 演示策略联合检查空检索、空引用与明确拒答 |
-
-Regression Gate 支持案例回归率、平均质量分变化、缺失案例数量，以及指标级绝对/相对变化约束。例如：
-
-```json
-{
-  "baseline_experiment_id": "<baseline-experiment-id>",
-  "candidate_experiment_id": "<candidate-experiment-id>",
-  "require_same_dataset_version": true,
-  "policy": {
-    "max_regression_rate": 0.05,
-    "min_average_score_delta": -0.02,
-    "max_missing_case_count": 0,
-    "metric_rules": [
-      {
-        "name": "keyword-score-regression",
-        "metric_name": "keyword_match",
-        "target": "score_delta_mean",
-        "operator": "gte",
-        "threshold": -0.02
-      }
-    ]
-  }
-}
-```
-
-将该请求提交至 `POST /gates/evaluate`。结果给出 passed / failed 和逐规则 finding，保留可评估性、实际值、阈值及原因。Gate 已有后端接口；将其接入 CI 的退出码或 PR 阻断仍需集成工作。
-
-## Adapter Studio
-
-入口：`/adapter-studio`。页面沿用现有 React 组件风格、API Client 和 TanStack Query，不增加大型 UI 框架。
-
-| 操作 | 页面提供的证据与保护 |
+| 层级 | 验证内容 |
 | --- | --- |
-| 创建 Profile，上传/输入 JSON 样本 | 不可变样本批次，可携带人工独立 Golden |
-| 查看 Inspector 字段 | 路径、类型、频率、nullable、缺失次数、跨样本差异与指纹 |
-| 生成候选 | 显式披露、异步任务状态、错误、修复反馈和来源不确定性 |
-| 查看规则 | Source Field → Target Field，操作与缺失/null 策略，完整 MappingSpec |
-| 运行预览 | Raw 与 Normalized 对比，逐事件原始指针关联 |
-| 运行验证 | L1/L2/L3、error/warning/unverified 和发布阻断原因 |
-| 人工审核发布 | 最新有效报告、审核说明、精确证据绑定，发布前再次确认 |
-| 查历史与使用 | 固定版本快照，实际 Job / Run / Attempt 产物计数，链接原 Replay |
+| **L1 · 结构** | Pydantic 契约、类型、枚举、时间格式、重复 Span ID |
+| **L2 · 拓扑** | parent 引用、父子环、明显时间异常；允许合法并发，Partial Trace 输出 warning |
+| **L3 · 语义** | 与人工定义 Golden 比较 Span Type、Token、Tool Call 等关键字段；证据不足保留 unverified |
 
-Registry Bearer 仅保存在页面内存，不写 localStorage、sessionStorage 或 URL。页面使用独立缓存；离开或断开后清除本页状态。reader / editor / publisher 权限由服务端确定；前端按钮和确认框不替代鉴权。
+Registry 用事务保护审核与发布，已发布版本不可变。独立 Golden 与人工确认约束语义发布，模型无法自动批准自己的输出。
 
-生成只在 queued/running 轮询；错误或终态停止，允许手动恢复。POST 不自动重试。提交生成请求时发生网络错误，应先查看历史任务，确认是否已入队，再决定是否显式重试。
+前端 Bearer 保存在页面内存；reader / editor / publisher 权限由后端校验。失败、修复记录、发布阻断原因都可见。
 
-详细流程：[Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md)。
+[Studio 页面](frontend/src/pages/AdapterStudioPage.tsx) · [Validator](backend/app/adapters/intelligent/validator.py) · [Registry Store](backend/app/registry/postgres_store.py) · [操作说明](docs/INTELLIGENT_ADAPTER_STUDIO.md)
 
-## 建议的演示路径
+## 真实端到端验证
 
-### 路径 A：不使用在线模型，展示平台工程闭环
+第三方插件使用真实包安装与 Entry Points 发现，覆盖完整业务链：
 
-适合首次评审、现场网络受限或希望控制费用的场景。
+```text
+安装公开 SDK
+  → 安装 evalforge-keyword-coverage
+  → 读取安装元数据 / EntryPoint.load / 原 Registry
+  → GET /evaluators / POST /experiments/run
+  → 多 Case 并发 / SDK 评分
+  → PostgreSQL result_json / GET /runs/{id}
+  → Baseline / Candidate Comparison
+  → 原 Regression Gate
+```
 
-| 顺序 | 打开哪里 | 展示什么 |
+测试 Dataset 为三个稳定 Case，预期关键词为 ["VPN","MFA"]：
+
+| 证据 | Baseline | Candidate |
 | --- | --- | --- |
-| 1 | `/evaluation-jobs/new` | 创建真实持久化 Job，说明案例、数据集标签和版本标签 |
-| 2 | `/evaluation-jobs/:jobId` | Worker 状态、处理进度、执行尝试、取消与 Experiment 关联 |
-| 3 | Experiment / Run Detail | 从汇总进入原始案例输出、指标明细和失败原因 |
-| 4 | `/runs/:runId/timeline` | 展示持久化 Trace；说明执行身份与事件来源 |
-| 5 | `/adapter-studio` | 导入异构样本，查看 Schema、创建人工候选、预览和验证 |
-| 6 | Gate API / Swagger | 比较两个已完成实验，查看规则级发布判定 |
+| 测试 Agent 输出 | VPN MFA | VPN |
+| keyword_coverage | 1.0 | 0.5 |
+| 有效配对数 | 3 | 3 |
+| 平均 score 变化 | — | **−0.5** |
+| 最大允许下降 | — | **0.2** |
+| Gate 判定 | — | **FAIL** |
 
-默认 DemoAgent 返回固定格式响应；要展示丰富模型/工具事件，应使用已有 Tracing / LangGraph 适配器的测试，或路径 B 的真实业务 Agent。
+Candidate 用例顺序反转后仍按 Case ID 对齐。测试直接查询 PostgreSQL JSONB，并经现有 Run / Comparison / Gate API 验证结果。
 
-Studio 可在不配置模型生成预算时使用人工候选。现成的离线样本、独立 Golden 和预先编写的修复规则见 [mini_mapping_agent.json](backend/tests/fixtures/mini_mapping_agent.json)：将 raw_response / golden 放入样本批次，将 repair_reply.mapping 作为人工规则。此方式验证管理与确定性链路，不代表真实 LLM 生成效果。
+额外验证包括：SDK-only 虚拟环境中插件未安装不可发现、安装后评分；该环境不存在后端 app / FastAPI。导入失败、缺依赖、重复入口、重复注册、配置错误、评分异常与超时都有独立测试。
 
-### 路径 B：展示独立业务 Agent 的真实评测
+**边界明确：** 这里使用真实 FastAPI ASGI、服务、插件与 PostgreSQL，业务 Agent 为确定性测试响应；没有以 Mock Registry 替代插件发现，也不将此解释为线上模型效果评估。
 
-入口：`/comparison`，侧栏 **Agent Showcase**。它是专门的业务演示页；通用 Experiment Comparison 与 Gate 通过后端 API 使用，`/gate` 当前仍为占位页。
+[完整 E2E 测试](backend/tests/test_keyword_coverage_e2e.py) · [阶段报告](docs/plans/evaluator-plugin-stage6.md)
 
-演示连接独立部署的业务 Agent，包含七个精选诊断案例：
+## 技术栈与项目结构
 
-- BM25 与 Hybrid + Reranker + 证据门控的检索/引用表现；
-- 多来源问题、无答案拒答与只读业务工具调用；
-- 显式注入 Dense 故障、结构化失败 Trace，以及移除故障后的真实执行。
-
-语料指纹用于避免旧标签对新语料产生虚假评分。已有持久化结果可以直接查看；创建新评测组才会触发新的 Agent 调用。
-
-**外部业务 Agent、Bridge、模型文件与其数据不包含在本仓库中。** 该演示是固定诊断集合，不是独立测试集上的质量提升证明，也不是单变量消融实验。部署与完整边界见 [业务 Agent 演示说明](docs/BUSINESS_AGENT_SHOWCASE.md)。
-
-## 运行项目
-
-以下命令在 **Ubuntu / WSL** 执行。浏览器使用本机 localhost。完整默认演示需要 PostgreSQL、API、Evaluation Worker 和前端；AI Mapping Generation 另需独立 Mapping Worker。
-
-### 1. 准备运行环境
-
-已验证环境：Python **3.12.3**、PostgreSQL **16**、Node **22.23.3**。前端使用 React 19、TypeScript 6、Vite 8、Tailwind 4；后端使用 FastAPI、Pydantic v2、psycopg 异步连接池。LangGraph / LangChain 用于框架适配和模型生成客户端。
-
-从仓库根目录首次安装：
-
-```bash
-python3.12 -m venv backend/.venv
-
-backend/.venv/bin/python -m pip install \
-  fastapi uvicorn 'pydantic>=2,<3' 'psycopg[binary,pool]>=3.2' \
-  python-dotenv httpx sqlalchemy aiosqlite \
-  langgraph langchain-core langchain-openai \
-  pytest pytest-asyncio
-
-# 使用已安装的 Node 22；如本机通过 nvm 管理，可先执行 nvm use 22
-npm --prefix frontend ci
-```
-
-已有可用虚拟环境时无需重建。当前根 requirements.txt 保留历史 httpx2 项，且没有完整列出 dotenv / 异步测试依赖，因此这里显式列出当前运行与测试所需包。后端尚未提供可复现依赖锁文件；上述是环境准备命令，不是已验证的全新环境一键安装承诺。
-
-### 2. 配置独立开发数据库
-
-准备一个可连接的 PostgreSQL 开发库，在本地 `backend/.env` 中填写：
-
-```dotenv
-HARNESS_DATABASE_URL="postgresql://USER:PASSWORD@127.0.0.1:5432/evalforge_dev"
-HARNESS_AGENT_KIND=demo
-```
-
-用实际账号替换 USER / PASSWORD。已有 .env 应保留并检查，不要覆盖。该文件已被 Git 忽略，不提交真实凭据。
-
-**首次初始化仅对选定的开发库执行。** 当前 Run / Experiment 的基础表由已有 Store.initialize 管理；Evaluation Job 及后续扩展使用显式 SQL 迁移。先创建基础表，再按顺序应用迁移：
-
-```bash
-cd backend
-.venv/bin/python - <<'PY'
-import asyncio
-from pathlib import Path
-
-from dotenv import load_dotenv
-from psycopg import AsyncConnection
-
-from app.config import get_database_url
-from app.harness.postgres_run_store import PostgresRunStore
-from app.harness.postgres_experiment_store import PostgresExperimentStore
-
-
-async def initialize():
-    """Create base tables and apply job migrations to the configured development DB."""
-    load_dotenv(".env")
-    dsn = get_database_url()
-    async with PostgresRunStore(dsn) as runs, PostgresExperimentStore(dsn) as experiments:
-        await runs.initialize()
-        await experiments.initialize()
-
-    async with await AsyncConnection.connect(dsn, autocommit=True) as conn:
-        for name in ("v0131_evaluation_jobs.sql", "v0136_recovery.sql"):
-            await conn.execute((Path("migrations") / name).read_text())
-
-
-asyncio.run(initialize())
-PY
-cd ..
-```
-
-可选 Intelligent Adapter 的迁移顺序为 `v014_adapter_registry.sql` → `v015_pinned_mapping_evaluation.sql`，在上述基础表和 Job 迁移之后应用。应用不会自动执行这些可选迁移。
-
-### 3. 启动 API、评测 Worker 与前端
-
-三个终端分别执行：
-
-```bash
-# 终端一：API
-cd backend
-.venv/bin/python -m uvicorn app.main:app \
-  --env-file .env --host 0.0.0.0 --port 8013
-```
-
-```bash
-# 终端二：Evaluation Worker
-cd backend
-.venv/bin/python -m app.worker
-```
-
-```bash
-# 终端三：前端，从仓库根目录执行
-VITE_API_BASE_URL=http://127.0.0.1:8013 \
-  npm --prefix frontend run dev -- --host 0.0.0.0 --port 5173 --strictPort
-```
-
-访问：
-
-- 前端：[http://localhost:5173/evaluation-jobs](http://localhost:5173/evaluation-jobs)
-- API 文档：[http://127.0.0.1:8013/docs](http://127.0.0.1:8013/docs)
-- 健康检查：[http://127.0.0.1:8013/health](http://127.0.0.1:8013/health)
-
-API 与 Worker 必须使用同一个数据库和一致的 Agent 配置。当前 CORS 允许 localhost:5173 与 127.0.0.1:5173；浏览器使用 WSL Network IP 或 Vite 自动切换端口会被拒绝。前端默认 API 地址为 8000，此处显式使用 8013，避免本机端口冲突。
-
-### 4. 创建第一个真实持久化 Job
-
-```bash
-curl -sS http://127.0.0.1:8013/evaluation-jobs \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "first-demo-evaluation",
-    "dataset_version": "demo-dataset-v1",
-    "agent_version": "demo-v1",
-    "cases": [
-      {
-        "id": "rag-001",
-        "input_text": "Explain RAG.",
-        "expected_output": "Demo Agent response: Explain RAG.",
-        "expected_tool_calls": [],
-        "metadata": {}
-      }
-    ]
-  }'
-```
-
-接口返回 job_id。Worker 处理后，可从任务进入 Experiment、Run 和 Timeline。
-
-agent_version、model_name、prompt_version 是实验记录标签，**不会仅凭标签自动部署模型或切换 Agent**。当前运行实现由服务端 HARNESS_AGENT_KIND 决定。CSV / JSON / JSONL 的加载和字段归一化已有库接口，当前没有完整 Dataset 管理 CRUD 页面/API。
-
-### 5. 可选：启用 Adapter Studio 与 AI 生成
-
-在已应用 v014 / v015 后，按 [Registry 配置说明](docs/INTELLIGENT_ADAPTER_REGISTRY.md) 配置：
-
-| 配置 | 用途 |
+| 层次 | 技术 |
 | --- | --- |
-| HARNESS_ADAPTER_REGISTRY_ENABLED=1 | 启用 API / Evaluation Worker 的 Registry 读取能力 |
-| HARNESS_ADAPTER_PRINCIPALS | 服务端 token_sha256、subject、role 绑定 |
-| HARNESS_MAPPING_GENERATION_BUDGET | 服务端 Token / 费用 / 次数 / 超时预算；不配置仍可使用人工规则流程 |
-| MAPPING_LLM_MODEL / MAPPING_LLM_API_KEY | 独立 Mapping Worker 的模型配置 |
-| MAPPING_LLM_BASE_URL | 可选模型供应商地址 |
+| 后端契约与 API | Python 3.12、FastAPI、Pydantic v2 |
+| 数据与任务 | PostgreSQL 16、psycopg 异步连接池、JSONB、显式 SQL 迁移 |
+| Agent 接入 | Local / LangGraph / Business HTTP Adapter |
+| 智能适配 | 声明式 DSL、Schema Inspector、确定性 Runtime、Golden Validator、独立生成 Worker |
+| 评测扩展 | 独立 SDK、Python Entry Points、Registry、服务端 allowlist |
+| 前端 | React 19、TypeScript 6、Vite 8、Tailwind 4、TanStack Query |
+| 验证 | pytest / pytest-asyncio、真实 PostgreSQL、Node 测试、浏览器交互测试 |
 
-重启 API / Evaluation Worker，使可选配置生效。Mapping Worker 与 Evaluation Worker 是不同入口；前者从进程环境读取配置，启动前需显式导入：
-
-```bash
-# 单独终端；仅在已配置模型和预算时启动
-cd backend
-set -a
-source .env
-set +a
-.venv/bin/python -m app.registry.worker
+```text
+packages/evaluator-sdk/                 # 可独立安装的公开协议 / Registry / Loader
+examples/evalforge-keyword-coverage/     # 真正独立的第三方指标包
+backend/
+├── app/
+│   ├── adapters/intelligent/           # DSL / Inspector / Runtime / Validator / 生成
+│   ├── evaluator/                      # 内置指标 / SDK 桥 / 目录 / 动态执行 / 比较适配
+│   ├── harness/                        # Contracts / Runner / Trace / Store / Experiment / Gate
+│   ├── jobs/                           # 持久化任务 / 领取 / 执行 / 恢复
+│   ├── registry/                       # Adapter 版本 / 审核 / 发布 / 生成任务
+│   ├── api/                            # HTTP 入口
+│   └── datasets/                       # CSV / JSON / JSONL 与 Case 归一化
+├── migrations/                         # Job / 恢复 / Registry / 固定 Mapping 迁移
+└── tests/                              # 单元 / API / 数据库 / 安装与端到端测试
+frontend/src/                           # Jobs / Experiments / Replay / Adapter Studio
+docs/                                  # 设计、接入、运行与阶段验证记录
 ```
 
-在 Studio 输入服务端配置的 Bearer，完成样本与规则流程。正式评测绑定 Mapping 时，创建 Job 还需显式提供 adapter_id、正整数 adapter_version，并使用 editor 以上 Registry 凭据；当前该响应集成要求 Business HTTP 模式。不要使用 latest，也不要将模型生成接口放入逐 Case 运行路径。
+## 运行与演示
 
-## 测试与验证证据
+默认 Demo 路径无需模型 API Key。完整平台由 PostgreSQL、API、Evaluation Worker 与前端组成；AI Mapping Generation 使用独立 Worker。
 
-以下是 **截至 2026-10-24 的具体验证范围**，各组存在交叉，不能相加当作独立测试总数；不以此宣称全项目全绿或生产容量已验证。
+[**本地安装、数据库初始化与启动步骤 →**](docs/GETTING_STARTED.md)
 
-| 范围 | 最近实际结果 | 环境与说明 |
-| --- | --- | --- |
-| DSL / Runtime / Inspector / Validator / Mini Mapping Agent | **443 passed，1.99s** | 本次 README 核对时重跑；离线，无真实 API Key |
-| Registry + Stage 7 评测集成 + Stage 8 API | **70 passed，23.27s** | Stage 8 记录；真实隔离 PostgreSQL，Agent / LLM 使用替身 |
-| 前端单元 / API 契约 | **14 passed** | Node 内置测试器 + Vite Loader |
-| 前端真实浏览器交互 | **6 passed，24.52s** | Chrome + Fake Registry；覆盖完整审核发布、鉴权失败、网络恢复及旧页面导航 |
-| 前端生产构建 / lint | **通过** | tsc -b + Vite build；JS gzip 113.99 kB |
-
-### 无数据库、无在线模型的核心测试
-
-在仓库根目录执行：
+安装公开 SDK 与示例插件：
 
 ```bash
-backend/.venv/bin/python -m pytest -q \
-  backend/tests/test_intelligent_mapping_contracts.py \
-  backend/tests/test_intelligent_mapping_runtime.py \
-  backend/tests/test_schema_inspector.py \
-  backend/tests/test_mapping_validator.py \
-  backend/tests/test_mini_mapping_agent.py
-
-npm --prefix frontend test
-npm --prefix frontend run build
-npm --prefix frontend run lint
+python -m pip install ./packages/evaluator-sdk
+python -m pip install ./examples/evalforge-keyword-coverage
 ```
 
-### 数据库事务与恢复测试
-
-在**专用隔离 PostgreSQL 测试实例**中配置 ADAPTER_REGISTRY_TEST_DSN，再执行：
+服务端授权插件后，重启 API / Worker：
 
 ```bash
-backend/.venv/bin/python -m pytest -q \
-  backend/tests/test_adapter_studio_api.py \
-  backend/tests/test_adapter_registry.py \
-  backend/tests/test_published_mapping_evaluation.py --tb=short
+export EVALFORGE_EVALUATOR_PLUGINS='{"allowlist":[{"evaluator_id":"keyword_coverage","distribution":"evalforge-keyword-coverage","distribution_version":"0.1.0"}]}'
 ```
 
-覆盖发布事务回滚、并发版本分配、不可变约束、角色鉴权、Lease / Heartbeat / Checkpoint、固定版本恢复、Mapping 故障隔离、Raw 关联、Replay 和指标语义。新测试为每项创建独立 schema 并保留数据；旧 PostgreSQL 测试另使用 TEST_POSTGRES_DSN，不应指向开发或生产数据。
-
-### 浏览器交互测试
-
-测试脚本复用环境中已有 Playwright 与 Chrome，不将其加入前端项目依赖。启动 Vite，设置 STUDIO_PLAYWRIGHT_MODULE、STUDIO_BROWSER_EXECUTABLE；必要时设置 STUDIO_BASE_URL。在 frontend 目录运行：
-
-```bash
-node --test --test-reporter=tap tests/browser/adapterStudio.browser.mjs
-```
-
-浏览器中的生成、验证响应是明确的 Fake Registry 数据，不能据此推断在线模型质量；真实服务和数据库行为由后端测试覆盖。详细命令与记录见 [Studio 验证说明](docs/INTELLIGENT_ADAPTER_STUDIO.md)。
-
-**已知测试债务：** 较大范围回归曾确认 `test_v11_experiment.py::test_duplicate_case_is_rejected` 的异常类型预期与 InMemoryExperimentStore 实现不一致，在原 Git HEAD 也可复现。该问题尚未修复；完整历史记录见 [Stage 7 集成说明](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) 与 [变更记录](AI_CHANGELOG.md)。
-
-## 主要 API
-
-以下路径已从当前 FastAPI OpenAPI 核对，完整字段以运行中的 `/docs` 为准。
-
-| 领域 | 入口 |
+| 演示入口 | 适合展示的工程点 |
 | --- | --- |
-| 异步评测 | POST /evaluation-jobs；GET 列表、详情、/{id}/progress；POST /{id}/cancel |
-| 实验 | POST /experiments/run；GET /experiments、/experiments/{id} |
-| 执行证据 | GET /runs、/runs/{id}、/runs/{id}/timeline |
-| 版本比较 | POST /comparisons/experiments |
-| 质量门禁 | POST /gates/evaluate |
-| Adapter Profile / 样本 | /adapter-registry/profiles；/profiles/{id}/samples；/samples/{id} |
-| 规则生成 / 候选 | /profiles/{id}/generations；/generations/{id}；/profiles/{id}/candidates |
-| 预览 / 验证 / 审核 / 发布 | POST /adapter-registry/candidates/{id}/preview、validate、review、publish |
-| 固定版本 / 使用 | GET /adapter-registry/profiles/{id}/versions、/versions/{version}、/versions/{version}/usage |
-| 私有原始产物 | GET /adapter-registry/runs/{run_id}/mapping-artifacts |
+| /evaluation-jobs/new → 任务详情 | 持久化任务、Worker 进度、取消、Experiment 关联 |
+| Experiment → Run → /runs/:runId/timeline | 从汇总指标追到执行证据 |
+| /adapter-studio | 异构样本分析、规则预览、验证与人工发布 |
+| GET /evaluators / 创建任务 API | 插件目录、显式指标选择与原持久化链路 |
+| POST /comparisons/experiments / POST /gates/evaluate | 版本差异与可解释门禁 |
+| /comparison · Agent Showcase | 独立业务 Agent 的检索、引用、拒答和故障诊断 |
 
-表中 Profile / 样本 / 生成候选的相对路径均在 /adapter-registry 下。Registry 接口和显式绑定 Mapping 的 Job 创建已有独立权限检查；旧评测 API 尚无全局统一认证，公开部署前需要补齐。
+Agent Showcase 使用独立部署的业务 Agent / Bridge，相关模型与数据不在本仓库中。[部署与诊断案例说明](docs/BUSINESS_AGENT_SHOWCASE.md)
+
+## 测试与验证
+
+最近完整 Python 测试记录：**2026-10-25，852 项，851 passed / 1 failed / 0 skipped，85.33s**。这是一份实际执行结果，不是 CI 状态徽章。
+
+```bash
+# 先安装 SDK / 示例包；数据库变量必须指向专用、隔离的测试 PostgreSQL
+ADAPTER_REGISTRY_TEST_DSN='专用 Registry 测试连接' TEST_POSTGRES_DSN='专用 agent_harness_test 测试连接' backend/.venv/bin/python -m pytest -q --tb=short backend/tests packages/evaluator-sdk/tests examples/evalforge-keyword-coverage/tests
+```
+
+| 验证层次 | 证据 |
+| --- | --- |
+| DSL / Runtime / Inspector / Validator / 生成服务 | 合法与非法输入、缺失/null、边界限制、确定性、修复与预算终止 |
+| PostgreSQL / Worker | 原子领取、租约、过期归属、Checkpoint 恢复、事务与并发发布 |
+| SDK / Registry / Loader | 独立协议、实例隔离、版本兼容、真实 Entry Points、来源与重复保护 |
+| 插件 E2E | 本阶段新增 **27 项全部通过**：17 项独立插件测试 + 10 项安装/API/数据库测试 |
+| Comparison / Gate | Case 对齐、方向、阈值边界、版本/配置/口径、部分缺失与不可比阻断 |
+| 前端历史验证 | 14 项单元/API 契约、6 项浏览器交互、生产构建与 lint；范围见 [Studio 记录](docs/INTELLIGENT_ADAPTER_STUDIO.md) |
+
+**已知失败：** test_v11_experiment.py::test_duplicate_case_is_rejected 期望 ExperimentRunConflictError，旧内存 Store 实际抛出 ValueError。该问题保留在报告中，未跳过或包装成全绿。完整命令、数据库隔离方式及警告见 [Stage 6 验证报告](docs/plans/evaluator-plugin-stage6.md)。
 
 ## 源码导读
 
-```text
-backend/
-├── app/
-│   ├── adapters/            # Local / LangGraph / Business HTTP 边界
-│   │   └── intelligent/     # DSL、Runtime、Inspector、Validator、生成与固定版本集成
-│   ├── agent/              # 本地与 LangGraph 演示 Agent
-│   ├── api/                # FastAPI 路由与错误处理
-│   ├── schemas/            # HTTP 请求/响应模型
-│   ├── datasets/           # CSV / JSON / JSONL 与 TestCase 归一化
-│   ├── evaluator/          # 质量、工具、时延、Token、费用与业务 RAG 指标
-│   ├── harness/            # Contracts、Runner、Trace、Store、Experiment、Comparison、Gate
-│   ├── jobs/               # 评测任务状态机、持久化领取与恢复执行器
-│   ├── registry/           # 规则持久化、鉴权、审核发布、独立生成 Worker
-│   ├── runtime_factory.py  # 服务端实际 Agent / Evaluator 选择
-│   └── worker.py           # 独立 Evaluation Worker
-├── migrations/             # 显式 SQL 迁移
-├── scripts/                # 业务 Agent 模式启动脚本
-└── tests/                  # 单元、契约、真实 PostgreSQL 与集成测试
-frontend/
-├── src/
-│   ├── api/                # 复用请求 Client 与类型化接口
-│   ├── components/         # 既有页面、Job 与 Adapter Studio 组件
-│   ├── hooks/              # Query / 命令 / 轮询生命周期
-│   ├── pages/              # Job、Experiment、Run、Timeline、Showcase、Studio
-│   ├── types/              # 前端传输契约
-│   └── utils/              # 表单、披露与显示纯函数
-└── tests/                  # Node 契约测试与可选浏览器交互测试
-docs/                       # 各模块设计、启动说明和验证边界
-```
+推荐从“契约 → 执行 → 恢复 → 扩展 → 决策”阅读，能快速掌握项目最有工程含量的部分：
 
-建议按“契约 → 编排 → 持久化恢复 → 规则治理 → 界面”的顺序阅读：
+1. [Contracts](backend/app/harness/contracts.py) / [SDK Models](packages/evaluator-sdk/src/evalforge_evaluator_sdk/models.py)：输入、证据、指标与未知状态。
+2. [HarnessRunner](backend/app/harness/runner.py) / [EvaluatorExecution](backend/app/evaluator/execution.py)：单 Case 生命周期与插件错误边界。
+3. [Job Executor](backend/app/jobs/executor.py) / [JobStore](backend/app/jobs/postgres_store.py)：多 Worker 归属、恢复与 Checkpoint。
+4. [Plugin Loader](packages/evaluator-sdk/src/evalforge_evaluator_sdk/plugin_loader.py) / [示例包](examples/evalforge-keyword-coverage)：第三方如何独立接入。
+5. [Mapping Runtime](backend/app/adapters/intelligent/runtime.py) / [Validator](backend/app/adapters/intelligent/validator.py)：如何约束异构数据与生成结果。
+6. [Registry Store](backend/app/registry/postgres_store.py) / [Published Adapter](backend/app/adapters/intelligent/published.py)：审核事务与固定版本执行。
+7. [比较适配](backend/app/evaluator/comparison.py) / [Regression Gate](backend/app/harness/regression_gate_service.py)：如何把指标转成可信版本决策。
 
-1. [contracts.py](backend/app/harness/contracts.py) 与 [context.py](backend/app/harness/context.py)：先理解数据和身份。
-2. [runner.py](backend/app/harness/runner.py)：跟踪一个 Case 的生命周期、重试、错误与保存。
-3. [executor.py](backend/app/jobs/executor.py) 与 [JobStore](backend/app/jobs/postgres_store.py)：看进程重启与旧 Worker 竞争时的行为。
-4. [runtime.py](backend/app/adapters/intelligent/runtime.py) 与 [validator.py](backend/app/adapters/intelligent/validator.py)：看未知数据如何被约束和解释。
-5. [Registry Store](backend/app/registry/postgres_store.py) 与 [v014](backend/migrations/v014_adapter_registry.sql)：看发布事务、并发和不可变性。
-6. [published.py](backend/app/adapters/intelligent/published.py)：看 AI 生成如何与正式执行隔离。
-7. [AdapterStudioPage.tsx](frontend/src/pages/AdapterStudioPage.tsx) 与 [ReviewWorkspace.tsx](frontend/src/components/adapters/ReviewWorkspace.tsx)：最后看端到端操作如何落到上述服务。
-
-## 设计文档
+## 深入文档
 
 | 主题 | 文档 |
 | --- | --- |
-| 真实业务 Agent 与诊断案例 | [Business Agent Showcase](docs/BUSINESS_AGENT_SHOWCASE.md) |
-| Mapping 配置契约 | [Mapping DSL](docs/INTELLIGENT_ADAPTER_MAPPING_DSL.md) |
-| 路径提取、类型与确定性执行 | [Mapping Runtime](docs/INTELLIGENT_ADAPTER_MAPPING_RUNTIME.md) |
-| 多样本结构分析与 Fingerprint | [Schema Inspector](docs/INTELLIGENT_ADAPTER_SCHEMA_INSPECTOR.md) |
-| 三层验证与独立期望 | [Validator / Golden Tests](docs/INTELLIGENT_ADAPTER_MAPPING_VALIDATOR.md) |
-| 受限生成、证据与有界修复 | [Mini Mapping Agent](docs/INTELLIGENT_ADAPTER_MINI_MAPPING_AGENT.md) |
-| 身份、队列、审核与发布事务 | [Adapter Registry](docs/INTELLIGENT_ADAPTER_REGISTRY.md) |
-| 版本绑定、故障隔离与指标一致性 | [Evaluation Integration](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) |
-| 前端操作闭环与交互测试 | [Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md) |
+| 安装、数据库初始化、API / Worker / 前端启动 | [本地运行](docs/GETTING_STARTED.md) |
+| 独立 SDK、插件注册、安装、评分与安全 | [第三方开发者指南](docs/extending-evaluators.md) |
+| 插件真实安装到 PostgreSQL / Gate | [第三方插件 E2E](docs/plans/evaluator-plugin-stage6.md) |
+| 指标方向、版本、配置与比较口径 | [Plugin Regression Gate](docs/plans/evaluator-plugin-stage5.md) |
+| 动态指标选择、执行与 Worker 固定计划 | [Dynamic Evaluator Execution](docs/plans/evaluator-plugin-stage4.md) |
+| Mapping 数据契约与确定性执行 | [DSL](docs/INTELLIGENT_ADAPTER_MAPPING_DSL.md) · [Runtime](docs/INTELLIGENT_ADAPTER_MAPPING_RUNTIME.md) |
+| 多样本结构分析与安全生成 | [Inspector](docs/INTELLIGENT_ADAPTER_SCHEMA_INSPECTOR.md) · [Mini Mapping Agent](docs/INTELLIGENT_ADAPTER_MINI_MAPPING_AGENT.md) |
+| 结构、拓扑、语义与 Golden | [Mapping Validator](docs/INTELLIGENT_ADAPTER_MAPPING_VALIDATOR.md) |
+| 审核、事务、版本与正式运行集成 | [Registry](docs/INTELLIGENT_ADAPTER_REGISTRY.md) · [Evaluation Integration](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) |
+| 前端与独立业务 Agent | [Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md) · [Business Agent Showcase](docs/BUSINESS_AGENT_SHOWCASE.md) |
 
-## 当前边界与下一步
+## 工程边界与后续演进
 
-| 当前边界 | 下一步工程工作 |
-| --- | --- |
-| 后端依赖清单遗留、未锁定；迁移由 Store 初始化和 SQL 脚本共同管理 | 整理可复现依赖、统一迁移入口和干净环境安装验证 |
-| 旧评测 API 无全局认证；Registry 为本地全局角色 | 统一身份、细粒度权限、多租户与部署边界 |
-| Raw / Golden / 报告可能包含敏感数据，尚无自动保留与清理策略 | 数据分级、脱敏策略、存储/备份与生命周期管理 |
-| 高并发吞吐和大规模历史使用查询未压测 | 容量基线、索引、查询计划与队列积压监控 |
-| 现有质量指标以确定性规则和参考标注为主 | 扩充独立评测集；需要语义 Judge 时单独校准其可靠性与成本 |
-| Gate 已提供 API，前端专页与 CI 阻断未完成 | 构建自动回归工作流并明确失败/未知证据策略 |
-| Bridge 是独立项目的本地接入；Checkpoint 不保证外部副作用 exactly-once | 接入协议版本化，以及面向具体 Agent 的幂等与取消设计 |
+项目已完成具有真实数据库、独立 Worker、插件安装与前端工作台的评测闭环。向生产部署演进时，仍需统一认证与多租户、可复现后端依赖、数据保留策略、容量压测和 CI 门禁集成。
 
-**项目的核心工程价值，是把不确定的 Agent 行为放入有契约、有执行所有权、有证据、有版本边界的评测流程，让“看起来更好”变成可以检查和讨论的结论。**
+- 第三方插件是受信任的同进程 Python；allowlist 不是沙箱，协作式超时不能强制终止恶意阻塞代码。
+- 稳定 Case ID 与版本标签需要配合不可变数据集治理；框架不能自动证明外部模型或资源语义未变化。
+- 规则指标和关键词覆盖提供可解释证据，语义正确性仍需独立标注与校准。
+- Replay 是执行证据查看；Gate 已有 API，前端 /gate 仍为占位页。
+
+**EvalForge 展示的是一套完整的 AI 评测工程方法：统一接入、受控扩展、可靠执行、证据关联、版本治理与可解释决策。**

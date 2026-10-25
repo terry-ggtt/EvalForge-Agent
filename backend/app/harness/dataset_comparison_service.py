@@ -1,3 +1,7 @@
+from app.evaluator.comparison import plugin_regression, plan_producers, paired_statistics
+from app.harness.regression_gate import MetricGateRule
+from app.harness.metric_semantics import MetricSemanticsError
+
 from app.harness.metric_semantics import ensure_metric_semantics
 import asyncio
 
@@ -66,8 +70,15 @@ class DatasetComparisonService:
         *,
         baseline_run_ids: list[str],
         candidate_run_ids: list[str],
+        metric_rules: list[MetricGateRule] | None = None,
     ) -> DatasetComparisonReport:
-        """Compare baseline_run_ids/candidate_run_ids using persisted canonical metrics; reject mapped pipeline failures."""
+        """Compare persisted baseline_run_ids/candidate_run_ids by Case ID and metric name.
+
+        metric_rules optionally compiles plugin per-Case tolerances using the
+        existing detector; omitted rules use zero plugin degradation tolerance.
+        Returns paired aggregates and findings. Raises existing missing-run,
+        duplicate-Case or metric-semantics errors before a Gate can pass.
+        """
         baseline_records = (
             await self._load_records(
                 baseline_run_ids,
@@ -155,11 +166,7 @@ class DatasetComparisonService:
                 )
             )
 
-            regression = (
-                self.detector.detect(
-                    comparison
-                )
-            )
+            regression = plugin_regression(comparison, self.detector, metric_rules)
 
             case_reports.append(
                 CaseComparisonReport(
@@ -204,6 +211,16 @@ class DatasetComparisonService:
             )
         )
 
+        if any(record.metadata.get("evaluator_plan") is not None
+               for record in matched_baseline_records + matched_candidate_records):
+            score_pairs = list(zip(matched_baseline_records, matched_candidate_records))
+            if all(a.result.score is not None and b.result.score is not None for a, b in score_pairs):
+                baseline_average_score, candidate_average_score, average_score_delta = paired_statistics(
+                    [a.result.score for a, b in score_pairs], [b.result.score for a, b in score_pairs])
+            else:
+                # Overall quality is unknown when the paired cohort is incomplete.
+                baseline_average_score = candidate_average_score = average_score_delta = None
+
         regression_case_count = sum(
             1
             for case_report
@@ -235,7 +252,11 @@ class DatasetComparisonService:
             )
         )
 
+        plugin_record = next((record for record in [*baseline_records, *candidate_records]
+                              if record.metadata.get("evaluator_plan") is not None), None)
         return DatasetComparisonReport(
+            evaluator_plan_digest=plugin_record.metadata["evaluator_plan"]["digest"] if plugin_record else None,
+            expected_evaluator_ids=sorted(plan_producers(plugin_record)) if plugin_record else [],
             baseline_run_count=
                 len(
                     baseline_records
@@ -417,6 +438,13 @@ class DatasetComparisonService:
         AggregateMetricComparison
     ]:
 
+        """Aggregate case_reports by metric name over valid pairs.
+
+        Returns the original paired arithmetic means and observation counts,
+        with optional SDK provenance and the full matched Case denominator.
+        Inconsistent plugin evidence or unrepresentable means raise
+        MetricSemanticsError; missing observations remain None.
+        """
         metrics_by_name = defaultdict(
             list
         )
@@ -599,8 +627,20 @@ class DatasetComparisonService:
 
                 value_count = 0
 
+            semantics = next((metric.semantics for metric in metrics if metric.semantics is not None), None)
+            if semantics is not None:
+                if any(metric.semantics != semantics for metric in metrics):
+                    raise MetricSemanticsError("Plugin aggregate statistical definitions disagree")
+                baseline_score_mean, candidate_score_mean, score_delta_mean = paired_statistics(
+                    baseline_scores, candidate_scores)
+                if value_comparable:
+                    baseline_value_mean, candidate_value_mean, value_delta_mean = paired_statistics(
+                        [metric.baseline_value for metric in comparable_values],
+                        [metric.candidate_value for metric in comparable_values])
             aggregates.append(
                 AggregateMetricComparison(
+                    semantics=semantics,
+                    matched_case_count=len(case_reports) if semantics is not None else None,
                     name=
                         name,
 

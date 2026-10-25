@@ -9,3 +9,6 @@ langgraph
 langchain-core
 langchain-openai
 psycopg[binary,pool]>=3.2
+
+# Install from the repository root; shared evaluator protocol and registry.
+./packages/evaluator-sdk

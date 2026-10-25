@@ -4,6 +4,7 @@ from typing import (
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     model_validator,
 )
@@ -45,6 +46,7 @@ class RegressionRule(
         higher is worse
     """
 
+    model_config = ConfigDict(allow_inf_nan=False)
     name: str
 
     target: RegressionTarget

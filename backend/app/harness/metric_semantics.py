@@ -20,6 +20,16 @@ def ensure_metric_semantics(records: Iterable[RunRecord]) -> None:
     old default-zero accounting as equivalent to explicit unknown evidence.
     """
     records = list(records)
+    plans = [record.metadata.get("evaluator_plan") for record in records]
+    if any(plan is not None for plan in plans):
+        if not all(type(plan) is dict and type(plan.get("digest")) is str for plan in plans):
+            raise MetricSemanticsError("Cannot mix default and explicitly selected evaluator semantics")
+        if len({plan["digest"] for plan in plans}) > 1:
+            raise MetricSemanticsError("Evaluator plans are incompatible")
+        if any(record.result.error is not None or record.result.failure_kind is not None for record in records):
+            raise MetricSemanticsError("Selected evaluator quality is unavailable")
+    from app.evaluator.comparison import validate_plugin_records
+    validate_plugin_records(records)
     bindings = [record.metadata.get("intelligent_adapter") for record in records]
     if any(bindings):
         if not all(type(binding) is dict for binding in bindings):

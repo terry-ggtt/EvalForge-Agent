@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalforge-test-faults"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["evalforge-evaluator-sdk>=0.3,<0.4"]
+
+[project.entry-points."evalforge.evaluators"]
+"fault.raises" = "evalforge_test_faults:RaisingEvaluator"
+"fault.timeout" = "evalforge_test_faults:TimeoutEvaluator"
+"fault.import" = "evalforge_test_import:Evaluator"
+"fault.dependency" = "evalforge_test_dependency:Evaluator"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["evalforge_test_faults", "evalforge_test_import", "evalforge_test_dependency"]

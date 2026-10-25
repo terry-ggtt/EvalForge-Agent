@@ -1,3 +1,5 @@
+from app.harness.regression_gate import MetricGateRule
+
 from app.harness.dataset_comparison_service import (
     DatasetComparisonService,
 )
@@ -51,8 +53,15 @@ class ExperimentComparisonService:
         baseline_experiment_id: str,
         candidate_experiment_id: str,
         require_same_dataset: bool = True,
+        metric_rules: list[MetricGateRule] | None = None,
     ) -> ExperimentComparisonReport:
+        """Compare completed experiments selected by baseline/candidate_experiment_id.
 
+        require_same_dataset preserves the existing version guard; metric_rules
+        forwards optional plugin tolerances to the original Dataset comparison.
+        Returns its existing report; missing/incomplete experiments and
+        incompatible metric evidence propagate the established typed errors.
+        """
         baseline = (
             await self.experiment_store
             .get(
@@ -131,6 +140,7 @@ class ExperimentComparisonService:
 
                 candidate_run_ids=
                     candidate.run_ids,
+                **({"metric_rules": metric_rules} if metric_rules is not None else {}),
             )
         )
 

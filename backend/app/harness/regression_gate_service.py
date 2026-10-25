@@ -1,3 +1,7 @@
+import math
+from decimal import Decimal, localcontext
+from app.evaluator.comparison import normalize_gate_rule, score_target
+
 from app.harness.dataset_comparison import (
     AggregateMetricComparison,
     DatasetComparisonReport,
@@ -140,7 +144,40 @@ class RegressionGate:
         dataset:
             DatasetComparisonReport,
     ) -> GateFinding:
+        """Check dataset regression rate against policy after SDK evidence coverage checks.
 
+        Empty alignments, missing producers/channels and unevaluable Case
+        findings return an unevaluable failure. Legacy nonempty reports keep
+        their original rate rule. No missing measurements are imputed.
+        """
+        invalid = dataset.compared_case_count == 0
+        if dataset.evaluator_plan_digest is not None or any(metric.semantics is not None for metric in dataset.metrics):
+            producers = {metric.semantics.manifest.evaluator_id for metric in dataset.metrics
+                         if metric.semantics is not None}
+            invalid = invalid or not dataset.evaluator_plan_digest or not dataset.expected_evaluator_ids
+            invalid = invalid or len(dataset.cases) != dataset.compared_case_count
+            invalid = invalid or bool(set(dataset.expected_evaluator_ids) - producers)
+            invalid = invalid or any(not finding.evaluable for case in dataset.cases
+                                      for finding in case.regression.findings)
+            for metric in dataset.metrics:
+                if metric.semantics is None:
+                    invalid = True
+                    continue
+                targets = {finding.target for case in dataset.cases for finding in case.regression.findings
+                           if finding.metric_name == metric.name}
+                invalid = invalid or not targets or metric.matched_case_count != dataset.compared_case_count
+                if "metric_score" in targets:
+                    invalid = invalid or metric.score_count != dataset.compared_case_count
+                if "metric_value" in targets:
+                    invalid = invalid or metric.value_count != dataset.compared_case_count or not metric.value_comparable
+                invalid = invalid or any(value is not None and not math.isfinite(value) for value in (
+                    metric.baseline_score_mean, metric.candidate_score_mean, metric.score_delta_mean,
+                    metric.baseline_value_mean, metric.candidate_value_mean, metric.value_delta_mean))
+
+        if invalid or not math.isfinite(dataset.regression_rate):
+            return GateFinding(rule_name="regression_rate", passed=False, evaluable=False,
+                threshold=self.policy.max_regression_rate,
+                reason="No aligned cases or incomplete plugin comparison coverage.")
         actual = (
             dataset.regression_rate
         )
@@ -186,7 +223,11 @@ class RegressionGate:
         dataset:
             DatasetComparisonReport,
     ) -> GateFinding:
+        """Check dataset's known finite paired overall score delta against policy.
 
+        Returns an unevaluable finding when quality is unavailable; raw
+        plugin measurements are not substituted for normalized quality.
+        """
         threshold = (
             self.policy
             .min_average_score_delta
@@ -197,7 +238,7 @@ class RegressionGate:
             .average_score_delta
         )
 
-        if actual is None:
+        if actual is None or not math.isfinite(actual):
 
             return GateFinding(
                 rule_name=
@@ -311,7 +352,12 @@ class RegressionGate:
         rule:
             MetricGateRule,
     ) -> GateFinding:
+        """Resolve rule against dataset's metric aggregate and apply the existing operator.
 
+        SDK direction inference and complete paired coverage are required.
+        Missing/incompatible/non-finite values return unevaluable failures;
+        explicit legacy signed thresholds retain their existing behavior.
+        """
         metric = (
             self._find_metric(
                 dataset,
@@ -340,6 +386,15 @@ class RegressionGate:
                 ),
             )
 
+        normalized = normalize_gate_rule(metric.semantics, rule)
+        coverage = metric.score_count if score_target(rule.target) else metric.value_count
+        if (normalized is None or (metric.semantics is not None and (
+                metric.matched_case_count != dataset.compared_case_count
+                or coverage != dataset.compared_case_count or coverage == 0
+                or (not score_target(rule.target) and not metric.value_comparable)))):
+            return GateFinding(rule_name=rule.name, passed=False, evaluable=False, threshold=rule.threshold,
+                reason="Metric direction or paired observation coverage is incompatible.")
+        rule = normalized
         actual = (
             self._resolve_metric_value(
                 metric,
@@ -347,7 +402,7 @@ class RegressionGate:
             )
         )
 
-        if actual is None:
+        if actual is None or not math.isfinite(actual):
 
             return GateFinding(
                 rule_name=
@@ -439,7 +494,12 @@ class RegressionGate:
         rule:
             MetricGateRule,
     ) -> float | None:
+        """Resolve metric using rule target, returning signed delta or relative ratio.
 
+        Relative means use abs(baseline) as the original denominator; unknown
+        or zero baselines return None. SDK Decimal intermediates preserve
+        inclusive threshold boundaries without changing that formula.
+        """
         if (
             rule.target
             == "score_delta_mean"
@@ -460,20 +520,9 @@ class RegressionGate:
                 .value_delta_mean
             )
 
-        if (
-            rule.target
-            == "relative_value_delta"
-        ):
-
-            baseline = (
-                metric
-                .baseline_value_mean
-            )
-
-            candidate = (
-                metric
-                .candidate_value_mean
-            )
+        if rule.target in {"relative_value_delta", "relative_score_delta"}:
+            baseline = metric.baseline_score_mean if score_target(rule.target) else metric.baseline_value_mean
+            candidate = metric.candidate_score_mean if score_target(rule.target) else metric.candidate_value_mean
 
             if (
                 baseline is None
@@ -484,13 +533,17 @@ class RegressionGate:
             if baseline == 0:
                 return None
 
-            return (
-                (
-                    candidate
-                    - baseline
-                )
-                / abs(baseline)
-            )
+            delta = metric.score_delta_mean if score_target(rule.target) else metric.value_delta_mean
+            if metric.semantics is not None:
+                if delta is None:
+                    return None
+                with localcontext() as context:
+                    context.prec = 50
+                    ratio = float(Decimal(str(delta)) / abs(Decimal(str(baseline))))
+                if ratio == 0 and delta != 0:
+                    return None
+                return ratio
+            return (candidate - baseline) / abs(baseline)
 
         return None
 

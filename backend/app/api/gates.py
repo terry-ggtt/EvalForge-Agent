@@ -56,7 +56,13 @@ async def evaluate_experiment_gate(
             get_experiment_comparison_service
         ),
 ) -> EvaluateExperimentGateResponse:
+    """Evaluate body policy against stored experiments through comparison_service.
 
+    Plugin tolerances reach the existing per-Case detector before aggregation.
+    Returns the original comparison/Gate response; existing HTTP/semantics
+    handlers report not-found or incomparable evidence without a PASS.
+    """
+    policy = body.policy.to_domain()
     try:
 
         comparison = (
@@ -73,6 +79,7 @@ async def evaluate_experiment_gate(
                 require_same_dataset=
                     body
                     .require_same_dataset_version,
+                **({"metric_rules": policy.metric_rules} if policy.metric_rules else {}),
             )
         )
 
@@ -97,10 +104,6 @@ async def evaluate_experiment_gate(
             detail=
                 str(exc),
         ) from exc
-
-    policy = (
-        body.policy.to_domain()
-    )
 
     gate = RegressionGate(
         policy=

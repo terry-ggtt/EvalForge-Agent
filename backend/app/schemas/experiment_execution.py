@@ -1,3 +1,5 @@
+from app.evaluator.contracts import EvaluatorChoices
+
 from typing import (
     Any,
 )
@@ -114,6 +116,8 @@ class RunExperimentRequest(
     Start and execute one complete
     EvaluationExperiment.
     """
+
+    evaluators: EvaluatorChoices | None = None
 
     name: str = Field(
         min_length=1

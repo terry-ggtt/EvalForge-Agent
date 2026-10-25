@@ -1,3 +1,6 @@
+from app.evaluator.catalog import summarize_plan
+from app.evaluator.contracts import EvaluatorSelectionError
+
 from app.adapters.intelligent.published import bind_published_runner, METRIC_SEMANTICS
 
 import logging
@@ -249,6 +252,8 @@ class EvaluationJobExecutor:
                 metadata={
                     **payload.metadata,
                     "evaluation_job_id": job.job_id,
+                    **({"evaluator_plan": summarize_plan(payload.evaluator_plan)}
+                       if payload.evaluator_plan is not None else {}),
                     **({"intelligent_adapter": {
                         "adapter_id": payload.adapter_id, "adapter_version": payload.adapter_version,
                         "mapping_digest": payload.adapter_mapping_digest, "metric_semantics": METRIC_SEMANTICS,
@@ -429,6 +434,13 @@ class EvaluationJobExecutor:
             )
 
             job_runner = await bind_published_runner(self.harness_runner, job, self.adapter_registry)
+            if job.payload.evaluators is not None:
+                if job.payload.evaluator_plan is None:
+                    raise EvaluatorSelectionError("queued_evaluator_plan_required")
+                job_runner = job_runner.with_evaluators(
+                    job.payload.evaluators, plan=job.payload.evaluator_plan,
+                    identity={"job_id": job_id})
+
 
             # -------------------------------------------------
             # Step 2: Load committed Case Checkpoints
@@ -473,6 +485,9 @@ class EvaluationJobExecutor:
                 )
             )
 
+            if job.payload.evaluators is not None:
+                job_runner.evaluation_identity["experiment_id"] = experiment_id
+
             # -------------------------------------------------
             # Step 5: Reconcile previously committed Runs
             # -------------------------------------------------
@@ -491,6 +506,11 @@ class EvaluationJobExecutor:
                     attempt_count=attempt_count,
                 )
 
+                if job.payload.evaluator_plan is not None:
+                    persisted = await self.experiment_service.run_store.get(checkpoint["run_id"])
+                    if (persisted is None or persisted.metadata.get("evaluator_plan", {}).get("digest")
+                            != summarize_plan(job.payload.evaluator_plan)["digest"]):
+                        raise EvaluatorSelectionError("checkpoint_evaluator_plan_mismatch")
                 if job.payload.adapter_id is not None:
                     persisted = await self.experiment_service.run_store.get(checkpoint["run_id"])
                     binding = persisted.metadata.get("intelligent_adapter", {}) if persisted else {}

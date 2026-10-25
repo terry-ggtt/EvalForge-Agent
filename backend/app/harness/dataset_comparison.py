@@ -1,3 +1,5 @@
+from app.evaluator.comparison_contracts import PluginMetricSemantics
+
 from pydantic import (
     BaseModel,
     Field,
@@ -14,9 +16,16 @@ class AggregateMetricComparison(
     """
     Aggregated comparison of one metric
     across all matched cases.
+
+    score_count/value_count count valid paired observations, not original
+    experiment sample sizes. matched_case_count is the SDK cohort denominator.
+    Delta is always candidate minus baseline, never direction-normalized.
+    semantics describes version/config provenance and paired mean scope.
     """
 
     name: str
+    semantics: PluginMetricSemantics | None = None
+    matched_case_count: int | None = Field(default=None, ge=0)
 
     score_count: int = 0
 
@@ -77,6 +86,8 @@ class DatasetComparisonReport(
     of Harness runs.
     """
 
+    evaluator_plan_digest: str | None = None
+    expected_evaluator_ids: list[str] = Field(default_factory=list)
     baseline_run_count: int
 
     candidate_run_count: int

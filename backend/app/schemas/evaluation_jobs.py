@@ -1,3 +1,5 @@
+from app.evaluator.contracts import EvaluatorChoices
+
 from datetime import datetime
 from typing import Any
 
@@ -27,6 +29,8 @@ class CreateEvaluationJobRequest(BaseModel):
     dataset_version: str = Field(min_length=1)
 
     agent_version: str = Field(min_length=1)
+
+    evaluators: EvaluatorChoices | None = None
 
     adapter_id: str | None = Field(default=None, strict=True, min_length=1, max_length=200, pattern=r"\S")
     adapter_version: int | None = Field(default=None, strict=True, ge=1)
@@ -88,6 +92,7 @@ class CreateEvaluationJobRequest(BaseModel):
             dataset_version=self.dataset_version,
             agent_version=self.agent_version,
             adapter_id=self.adapter_id, adapter_version=self.adapter_version,
+            evaluators=self.evaluators,
             model_name=self.model_name,
             prompt_version=self.prompt_version,
             metadata=dict(self.metadata),
@@ -100,6 +105,7 @@ class CreateEvaluationJobRequest(BaseModel):
 
 class EvaluationJobResponse(BaseModel):
     job_id: str
+    evaluator_ids: list[str] | None = None
 
     status: EvaluationJobStatus
     adapter_id: str | None = None
@@ -144,6 +150,7 @@ class EvaluationJobResponse(BaseModel):
         """Return API view of job, including immutable optional published binding; no raw artifacts exposed."""
         return cls(
             job_id=job.job_id,
+            evaluator_ids=[item.evaluator_id for item in job.payload.evaluators] if job.payload.evaluators is not None else None,
             status=job.status,
             adapter_id=job.payload.adapter_id, adapter_version=job.payload.adapter_version,
             adapter_mapping_digest=job.payload.adapter_mapping_digest,

@@ -1,5 +1,7 @@
 from pydantic import (
     BaseModel,
+    ConfigDict,
+    model_validator,
     Field,
 )
 
@@ -30,9 +32,17 @@ class MetricGateRuleRequest(
 
     target: MetricGateTarget
 
-    operator: GateOperator
+    model_config = ConfigDict(allow_inf_nan=False)
+    operator: GateOperator | None = None
 
     threshold: float
+
+    @model_validator(mode="after")
+    def validate_tolerance(self) -> "MetricGateRuleRequest":
+        """Validate this new automatic tolerance before API side effects; keep legacy explicit operators."""
+        if self.operator is None and self.threshold < 0:
+            raise ValueError("Automatic direction requires a nonnegative tolerance")
+        return self
 
     def to_domain(
         self,
@@ -59,6 +69,7 @@ class MetricGateRuleRequest(
 class RegressionGatePolicyRequest(
     BaseModel
 ):
+    model_config = ConfigDict(allow_inf_nan=False)
     max_regression_rate: float = Field(
         default=0.05,
         ge=0.0,

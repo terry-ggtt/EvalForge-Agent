@@ -246,3 +246,104 @@ Preserved:
   - README MappingSpec 通过实际 Pydantic 校验和 Runtime，实际形状样本输出/Token 保留正确；缺时间输入失败。Job curl JSON 和 Gate JSON 通过实际请求模型。主要路由通过 create_app().openapi() 核验，不启动 lifespan 或连接数据库。
   - README 中其余 70 项 PostgreSQL、14 项前端、6 项浏览器及构建数据明确标注为 Stage 8 最近记录，没有在本次文档工作重复执行，也不累计为独立测试总数；保留已确认的旧 Experiment 测试债务。
 - 后续：全新依赖安装/首次建库脚本仅完成语法与代码路径核对，未实际执行；未运行生产迁移、全项目全量、容量测试或在线模型。没有新增依赖、业务改动、commit/push 或数据删除。后续仍需后端依赖锁定、统一迁移、生产身份、Raw 生命周期与容量验证。
+
+
+## 2026-10-25 — Evaluator Plugin Stage 1：独立 SDK 与兼容边界
+
+- 请求：按最新 Stage 1 指令实现独立安装的 Evaluator SDK、Manifest、Context、结果状态、统一异步协议和兼容层；不实现 Entry Points，不改 Comparison/Regression/Gate 或正式执行链路。
+- 澄清：无追加确认。最新指令将本阶段定义为 SDK，优先于 Stage 0 中建议的 Registry/配置阶段安排；采用一调用一指标，保留原 BaseEvaluator 和领域模型。
+- 范围：新增 packages/evaluator-sdk；新增 Harness 显式 sdk_compat 及单元测试；新增 Stage 1 说明，追加本记录。保留原 docs/plans/evaluator-plugin-stage0.md 的未跟踪状态，不将其归为本次新增。
+- 数据链：旧 TestCase/AgentResult -> context_from_legacy 独立 JSON 快照 -> 可选 SDKToLegacyEvaluator 单次 async evaluate -> validate_metric -> 原 MetricResult DTO（details 内版本化 SDK 信封）-> 原 JSONB/API 形状。只验证显式注入兼容，不修改工厂/Runner/Worker 自动装配。
+- 文件：packages/evaluator-sdk/pyproject.toml 为独立构建/依赖配置；.gitignore 忽略 egg-info；README.md 提供安装/示例；src/evalforge_evaluator_sdk/models.py 定义严格契约及状态矩阵；base.py 定义 Protocol；__init__.py 导出公共接口；py.typed 提供 PEP 561 标记；tests/test_sdk.py 验证公共协议。backend/app/evaluator/sdk_compat.py 实现旧输入、结果、执行接口的显式桥接；backend/tests/test_evaluator_sdk_compat.py 验证兼容；docs/plans/evaluator-plugin-stage1.md 记录设计/数据流/文件/测试/风险；AI_CHANGELOG.md 追加本记录。
+- 决策：score 是 0～1、越高越好的质量分，value 是有限原始数值，direction 描述 value；不自动推导/反转数值。状态显式 success/missing/not_applicable/unverified/error，非成功无数值，缺失须 reason，错误须结构化 error。仅依赖 Pydantic；不新建 SDK TraceEvent，用现有 JSON 序列化快照；输入深拷贝，顶层冻结，边界重验证。扩展保存在 details._evalforge_evaluator_sdk，逆向检测错配但不充当签名。历史数值缺失保守解释为 unverified；已知 N/A 需明确证据。
+- 验证：
+  - backend/.venv/bin/python -m pytest -q -c packages/evaluator-sdk/pyproject.toml packages/evaluator-sdk/tests：28 passed in 0.04s。
+  - backend/.venv/bin/python -m pytest -q backend/tests/test_evaluator_sdk_compat.py：最终 33 passed in 0.09s，含五状态 JSON 往返、整数精度、旧 API response、旧内置评测器、显式旧 Runner 注入、取消传播、安全边界错误和输入隔离。
+  - 在 /tmp/evalforge-sdk-stage1-70yia37o/clean-env 独立环境构建 wheel/sdist，安装 wheel；仓库外运行同一 SDK 测试 28 passed in 0.08s（不重复累计测试数），Pydantic 2.14.1；原后端为 2.13.5。核对从 site-packages 导入、无 app/FastAPI/psycopg 可用、py.typed 存在、包源码与 wheel 一致、没有 Entry Points。构建产物留在仓库外，未上传。
+  - Stage 0 相同 18 个测试模块：56 passed / 1 failed / 3 warnings in 1.89s。失败仍为 test_v11_experiment.py::test_duplicate_case_is_rejected，预期 ExperimentRunConflictError、实际 ValueError；未改变既有失败。命令完整保存在 Stage 1 文档。
+  - AST、全部新函数 docstring、独立依赖边界、无 eval/exec/动态导入、代码围栏、git diff --check 均通过。未运行真实数据库/在线模型/前端/全量测试；API 验证为模型序列化。
+- 后续边界：DTO 兼容不等于旧 Runner 已支持新状态。显式执行桥对 missing/unverified/error 抛出附带结构化 metric 的异常，但旧非 Mapping Runner 仍按原规则记录 score=0/failure_kind=None 并丢弃指标；全 N/A 仍可能聚合 0。后续 Engine 需处理状态隔离/持久化，本次未修。Manifest.direction 不改 Comparison/Gate；未做任务版本冻结、插件沙箱或自动加载。Python 3.11/Pydantic 2.7 最低版本尚未逐项测试；使用兼容层前需显式安装 SDK。不执行 commit/push，Stage 1 完成后停止。
+
+
+## 2026-10-25 — Evaluator Plugin Stage 2：静态 Evaluator Registry
+
+- 请求：基于 Stage 1 SDK 提供内置/第三方显式注册、按 ID 查询与创建、元信息列表、统一注册错误、重复/协议/API 版本保护及并发实例隔离测试；不实现 Entry Points，不修改 Comparison 或 Regression Gate。
+- 澄清：无追加确认。只接受 SDK 协议的同步零参数工厂；每个 ID 只存一个实现版本，任何来源均不能覆盖已有 ID。已有旧内置实现由显式通用兼容桥接入，不改变默认 runtime_factory。
+- 范围：在独立 SDK 增加 Registry、元信息快照、统一错误和 36 项测试；SDK 发行版增至 0.2.0、API 保持 1.0。兼容层增加 LegacyToSDKEvaluator，追加 6 项真实内置注册与未知字段保护测试；没有新增依赖、数据库/API/Runner/Worker 或业务评分算法改动。保留全部 Stage 0/1 既有未提交工作。
+- 数据链：可信装配提供 Manifest/工厂 -> 注册声明/版本/重复校验 -> 锁外构造一次协议预检 -> 锁内复查并发布 -> get/list 返回脱离工厂的快照 -> create 锁外重新构造及复核 -> 锁内弱引用身份检查 -> 实例返回调用方。实际评分在 Registry 外；旧内置类可通过 LegacyToSDKEvaluator -> 原 evaluate(case,result) -> metric_from_legacy/validate_metric 显式桥接。
+- 文件：新增 packages/evaluator-sdk/src/evalforge_evaluator_sdk/registry.py、packages/evaluator-sdk/tests/test_registry.py、docs/plans/evaluator-plugin-stage2.md；修改 SDK __init__.py（导出）、pyproject.toml（版本）、README.md（注册示例及保证边界）、backend/app/evaluator/sdk_compat.py（通用反向桥）、backend/tests/test_evaluator_sdk_compat.py（追加兼容测试）；追加本 AI_CHANGELOG.md。
+- 决策：注册预构造只检查协议，不调用 evaluate，因此工厂需廉价、无 I/O。目录变更/实例身份检查用 RLock 原子保护，第三方构造在锁外运行。所有来源重复拒绝，第三方覆盖内置有独立错误码。WeakValueDictionary 拒绝同一存活对象跨任务复用且不永久保留任务状态；__slots__ 插件须支持 __weakref__。不同实例的嵌套/全局共享状态仍由工厂负责，不使用任意对象 deepcopy 伪装深层隔离。source 是可信装配声明，不是权限凭据。
+- 验证：
+  - backend/.venv/bin/python -m pytest -q -c packages/evaluator-sdk/pyproject.toml packages/evaluator-sdk/tests：64 passed in 0.10s（原 28 + 新 Registry 36）。
+  - backend/.venv/bin/python -m pytest -q --tb=short，加 test_evaluator_sdk_compat、test_v11_comparison、test_v11_dataset_comparison、test_v11_experiment_comparison、test_v11_regression、test_v11_regression_gate、test_v11_experiment_runner、test_v12_openapi、test_v13_jobs_contract 九个模块：59 passed / 1 warning in 0.60s（兼容层 39 + 原相关回归 20）。warning 为旧 TestCase 收集提示。完整命令见 Stage 2 文档。
+  - 复用 Stage 1 独立环境重新构建并安装 0.2.0 wheel/sdist，在仓库外复制两套 SDK 测试运行 64 passed in 0.13s；这是相同测试的安装验证，不累计新测试数。核对 site-packages 来源、py.typed、无 app/FastAPI/psycopg 可用。后端安装本次 wheel，其他依赖未修改。产物在 /tmp/evalforge-evaluator-registry-stage2-d1otjeo_/dist，未上传发布。
+  - AST/新函数 docstring、作用域空白、SDK 依赖边界、README Python 示例语法、wheel 源码一致性、无 Entry Points、git diff --check 均通过。
+- 后续：注册 API 不负责评分结果验证、任务方法版本冻结、多版本解析、生命周期关闭、异步构造或插件沙箱。旧 Runner 的异常/N/A 计分语义没有改变。未运行全量、数据库或在线服务；Stage 1 已记录的旧 Experiment 异常类型失败本阶段未复跑或修复。不自动接入现有默认指标，不执行 commit/push，Stage 2 完成后停止。
+
+
+## 2026-10-25 — Evaluator Plugin Stage 3：Entry Points 发现与受控加载
+
+- 请求：使用标准库 importlib.metadata 的固定 evalforge.evaluators 入口组，分离发现/加载/注册，按 ID 选择加载与实例化，校验 SDK、拒绝重复、隔离单插件失败，记录来源/版本/错误，支持服务端 allowlist，明确安装/重启及非沙箱边界；不修改 Runner/Comparison/Gate。
+- 澄清：无追加确认。规定 Entry Point 名等于 evaluator_id，导出带公开 Manifest 的同步零参数类/工厂，避免为按 ID 选择而先导入所有插件。来源允许清单绑定 ID + 发行包 + 可选精确包版本，默认空；重复入口名全部拒绝，已有 Registry ID 继续禁止覆盖。
+- 范围：SDK 增加独立 Loader 与 JSON 诊断契约，发行版至 0.3.0、API 仍 1.0；后端仅增加服务端 JSON 环境配置读取；提供可独立安装示例包。无新增依赖、API/数据库/Runner/Worker 集成、运行时安装或任意导入路径入口。保留 Stage 0/1/2 既有未提交工作。
+- 数据链：管理员构建/安装插件 -> dist-info 元数据 -> metadata.entry_points(group=evalforge.evaluators) -> 允许规则及重复入口检查 -> 对选定 ID 调 EntryPoint.load -> SDK Manifest/API/ID 核对 -> Registry.register 的异步协议/完整声明/重复/新鲜实例预检 -> Registry.create 按 ID 生成任务实例。Loader 不调用 evaluate。
+- 文件：新增 packages/evaluator-sdk/src/evalforge_evaluator_sdk/plugin_loader.py（策略、记录和 Loader）、packages/evaluator-sdk/tests/test_plugin_loader.py（26 项 Loader 测试）、backend/tests/test_evaluator_plugin_config.py（6 项配置测试）；新增 examples/evaluator-plugin/{pyproject.toml,README.md,.gitignore,src/evalforge_example_evaluator/__init__.py}；新增 docs/plans/evaluator-plugin-stage3.md。修改 SDK __init__.py（公共导出）、pyproject.toml（版本）、README.md（加载与部署边界）、backend/app/config.py（新增环境配置函数，原数据库 getter AST 不变）；追加 AI_CHANGELOG.md。
+- 决策：发现不导入、不构造；加载不注册；注册复用 Stage 2，不复制协议引擎。失败记录保留包名/版本及安全 code/异常类型，未知 Manifest 留空；不保存任意插件异常原文。单插件错误不重置 Registry，批量选定加载继续；SystemExit 受控捕获、KeyboardInterrupt 保留。Loader 使用单启动线程、固定发现快照、失败终态；没有热更新管理器或并发导入调度。没有 DB/服务密钥传给零参数工厂，但同进程插件仍可自行访问环境，因此只允许受信包且不是沙箱。
+- 验证：
+  - backend/.venv/bin/python -m pytest -q -c packages/evaluator-sdk/pyproject.toml packages/evaluator-sdk/tests：90 passed in 0.13s（原 64 + 新 26）。覆盖正常阶段分离、默认/来源/版本阻断、未选择不导入、缺失依赖/导入异常/SystemExit、同名入口、Registry 覆盖、SDK/协议/ID 错配、元数据错误隔离、JSON 往返和真实 PathDistribution/EntryPoint.load。
+  - 后端十个模块 test_evaluator_plugin_config、test_evaluator_sdk_compat、test_v11_comparison、test_v11_dataset_comparison、test_v11_experiment_comparison、test_v11_regression、test_v11_regression_gate、test_v11_experiment_runner、test_v12_openapi、test_v13_jobs_contract：65 passed / 1 warning in 0.61s。warning 为原 TestCase 收集提示，完整命令见 Stage 3 文档。
+  - 构建 SDK 0.3.0 与示例插件 0.1.0 wheel，复用独立 SDK 环境安装，仓库外三套测试 90 passed in 0.14s（同套安装验证不重复累计）。实际扫描安装元数据、断言发现不导入、load 后尚未注册、注册成功、创建两个独立实例，SDK 来自 site-packages，py.typed 存在，app/FastAPI/psycopg 不可用。示例只安装在独立环境，后端只更新 SDK。wheel 保留 /tmp/evalforge-entrypoints-stage3-4p5p9wx8/dist，未上传。
+  - 首轮修正新增严格 tuple 配置/报告的 JSON 往返及 Python 3.12 EntryPoints 测试索引用法；安装冒烟发现 __all__ 缺少 Loader 导出，已修正、重建安装并最终通过。
+  - AST/新函数 docstring、无 Loader 安装/任意 exec、SDK 依赖边界、原 DB getter AST、README Python/TOML 语法、wheel 源码一致性、实际 entry_points.txt 与 git diff --check 通过。
+- 后续：安装/更新/卸载或策略变更应由管理员构建环境并重启全部相关服务/Worker；新 Loader 不清除 Python 模块缓存，不能可靠热更新。allowlist 不是签名校验，恶意第三方代码仍能挂起/退出或读取环境。报告当前仅进程内，不是持久化审计。尚未接入正式任务/方法版本冻结，旧 Runner 错误/N/A 计分语义保持不变；未运行全量/数据库/在线服务/生产部署，旧 Experiment 异常类型问题未越界修复。不执行 commit/push，Stage 3 完成后停止。
+
+
+## 2026-10-25 — Evaluator Plugin Stage 4：动态评测接入原 Runner
+
+- 请求：将 Stage 1-3 的 SDK/Registry/Loader 接入现有 Runner，支持多指标选择、Context/结果转换、独立异常、配置/超时/取消、并发、现有存储/API 与异步 Job；保留默认行为，不复制 Runner，不绕过 Store/Checkpoint，不因单插件失败丢失其他指标。
+- 澄清：无追加确认。先全库追踪正式同步 Experiment、Worker/Executor、旧 EvaluationRunner shim、Published Runner 克隆和本地示例。真实评分均汇入 HarnessRunner._run_case；API Gates 和 Mapping Runtime 的 evaluate 不是插件入口。仅显式选择启用新边界。
+- 范围：新增后端选择/固定绑定契约、启动目录装配、单指标执行边界、GET /evaluators 与 46 项新测试（41 单元/API + 5 PostgreSQL）。原 API 两个创建接口追加可选 evaluators，既有 JSONB payload 保存固定计划，不新增表/列/迁移。没有第二套 Runner、前端、运行时 pip、任意请求导入路径或新框架；保留所有 Stage 0-3 未提交工作。
+- 数据链：API/Worker build_harness_runner -> SDK Registry 内置工厂和允许的 Entry Points -> Catalog.resolve 配置/版本校验 -> 同步任务内绑定或 Job payload_json 固定计划 -> 原 HarnessRunner._run_agent/Trace -> EvaluatorExecution 每 Case/指标新实例 -> context_from_legacy -> async evaluate/wait_for -> validate_metric/metric_to_legacy -> 原 RunRecord.from_execution/RunStore.result_json.metrics -> 原 Run 查询 API。Executor 继续用原 Lease/Heartbeat/fencing、Case Checkpoint/Progress、Experiment 关联；恢复检查 Run 计划摘要。
+- 文件：新增 backend/app/evaluator/{contracts,catalog,execution}.py、backend/app/api/evaluators.py、backend/tests/{test_dynamic_evaluators,test_dynamic_evaluators_postgres}.py、docs/plans/evaluator-plugin-stage4.md。修改 backend/app/harness/{runner,experiment_runner,metric_semantics}.py、runtime_factory.py、main.py、api/{experiment_execution,evaluation_jobs}.py、schemas/{experiment_execution,evaluation_jobs}.py、jobs/{models,executor}.py、adapters/intelligent/published.py、evaluator/runner.py；修改 requirements.txt 声明本地 SDK、根 README 文档索引、SDK/示例 README；追加本记录。Stage 0-3 文件不重复归为本次新增。
+- 决策：不传/传 null 保留旧实例循环；空列表拒绝。显式选择最多 16 个不同 ID，超时默认 30 秒、范围 (0,300]；可选 Pydantic config_model 必须 extra=forbid，strict 校验，否则只接受空 config。Manifest/包来源/配置 Schema/规范化配置/timeout 固定并在 Worker 复核，实际实例前后核对声明。每 Case 内顺序执行，Case 级并发沿用原 Semaphore；每次 Registry.create，不共享插件实例。
+- 错误与安全：每个执行错误/超时/非法输出保存一个 SDK error 指标，其他成功指标保留；同名输出全部冲突失败，错误指标采用保留前缀+ID 哈希。missing/unverified/error 使 Case.score=None、failure_kind=evaluation；合法 raw-only/N/A 不伪造 0。取消向上传播并清理 Runner 拥有的兄弟任务，不提交未完成 Case。成功/失败指标均使用原 DTO 的 details 扩展，未引入平行指标表。
+- 兼容取舍：Job.completed 仍表示所有 Case 已处理，failed_cases 依原 result.error 计数。Published 克隆显式保留目录/执行边界，原产物事务和 Replay 保持。evaluator config 不放入会传给 Agent 的 RunContext.metadata；计划摘要只在持久化边界加入，保留键拒绝用户来源冒充但原 Case 内容仍保存。Comparison/Regression/Gate 算法不改，仅扩展已共用的 ensure_metric_semantics 前置检查，拒绝异计划/默认混用/不完整执行；同计划合法原始计量仍走原 value 比较。
+- 验证：
+  - 最终 backend/.venv/bin/python -m pytest -q --tb=short backend/tests/test_dynamic_evaluators.py：41 passed in 0.78s。包括全部 SDK 状态、多指标异常/超时/坏输出保留、配置执行前校验、并发状态/输入隔离、取消清理、真实 EntryPoint 启动到 Runner、旧 shim/default、API 到原指标查询、计划/来源保护和 raw-only 比较。
+  - 新测试与 Stage 0 相同 18 个核心模块及 SDK 兼容/配置模块合跑：142 passed / 1 failed / 3 warnings in 2.10s。唯一失败仍为 test_v11_experiment.py::test_duplicate_case_is_rejected，预期 ExperimentRunConflictError、实际 ValueError；未修改该实现或掩盖失败。完整命令见阶段报告。
+  - 私有 PostgreSQL 16 socket、每项新建保留 Schema，test_dynamic_evaluators_postgres.py + test_published_mapping_evaluation.py：29 passed in 14.33s（新 5 + 原 24）。验证真实 API/Job/Executor/JSONB/Checkpoint/原 Run API，Checkpoint 后中断恢复跳过已提交 Case、版本不同执行前拒绝、取消未提交进度可恢复、Published Mapping/产物/Replay 与动态执行兼容。Agent HTTP 使用 MockTransport，没有在线服务或模型。
+  - SDK/Registry/Loader 原测试：90 passed in 0.19s，未修改 SDK 协议/Registry/Loader 实现。
+  - AST/新函数 docstring、无第二 Runner/任意 exec、原 Comparison/Regression/Gate 算法与 Worker/Store 文件未修改、源码锚点、文档围栏/请求模型、OpenAPI /evaluators、git diff --check 通过。临时 PG 已停止，未删除旧数据或测试 Schema。
+- 后续：wait_for 为协作式超时，非阻塞/恶意 Python 的强制沙箱；Job 取消请求仍按原 Case 边界，Worker Task 取消可传播。包/Manifest/配置快照不替代代码签名和外部资源版本管理。动态 Cost 缺定价明确 unverified；旧 BusinessRAG 未标适用性仍保守 unverified。SDKToLegacyEvaluator 单独注入旧循环仍是旧异常策略，只有显式动态路径提供新隔离。旧 requirements 的 httpx2 等问题未越界修改，未宣称全新后端依赖安装/全量/前端/负载/生产部署通过。Run 与 Checkpoint 仍为两个提交边界，不宣称 exactly-once。不 commit/push，Stage 4 完成后停止。
+
+## 2026-10-25 — Evaluator Plugin Stage 5：复用回归比较与 Gate
+
+- 请求：第三方指标按稳定 Case ID/指标名参与 Baseline/Candidate 比较，校验版本/配置/口径，按方向与绝对/相对容忍度判断，缺失及不可比证据不得 PASS。
+- 澄清：无追加确认。复用原 ExperimentComparison、RegressionDetector、MetricGateRule 和 RegressionGate；不新增引擎、Runner、数据表或依赖。
+- 数据链：原 Runner/SDK 信封 -> 原 RunRecord/JSONB -> 共有语义前置检查 -> Case/指标配对 -> 插件规则适配 -> 原 detector -> 原配对均值 -> 原 Gate -> 原 API。
+- 文件：新增 backend/app/evaluator/{comparison_contracts,comparison}.py、backend/tests/{test_plugin_regression_gate,test_plugin_regression_gate_postgres}.py、docs/plans/evaluator-plugin-stage5.md；修改 harness/{comparison,comparison_service,dataset_comparison,dataset_comparison_service,experiment_comparison_service,metric_semantics,regression,regression_detector,regression_gate,regression_gate_service}.py、schemas/{comparisons,gates}.py、api/gates.py、README.md、packages/evaluator-sdk/README.md；追加本记录。
+- 决策：可选证据模型不替代 Metric；整组计划一致且指标版本/口径一致才能比较。SDK score 方向固定高优，value 用声明；省略 operator 的非负容忍度编译为旧规则，旧显式操作符保留。默认 SDK 检查全部已出现通道。Gate API 将策略容忍度送入逐 Case detector，避免旧总分规则冲突。Decimal 中间值保持原减法/均值公式，超出范围和下溢拒绝。完整覆盖/生产者、空交集、部分总分与有限值检查失败关闭。
+- 验证：25 模块相关后端 200 passed / 1 failed / 5 warnings in 4.77s，唯一为已知重复 Case 异常类型问题，未掩盖。新单元/API 47 项在通过项中。真实私有 PG 5 项新测试 + 原动态/Published 29 项共 34 passed in 18.65s。SDK/Registry/Loader 原测试 90 passed in 0.10s。A/B failed，C 不可评估 failed，D 409；阈值边界、乱序、缺失、样本数、配置/版本/口径/单位、原查询 API 均覆盖。
+- 后续：没有统计显著性算法，外部资源版本必须由作者声明；整计划摘要比较较保守。无前端/负载/生产在线验证；原重复 Case 异常类型失败保留。未 commit/push。用户已追加授权 Stage 6，接续独立插件真实安装 E2E。
+
+## 2026-10-25 — Evaluator Plugin Stage 6：独立关键词覆盖率包与真实安装 E2E
+
+- 请求：创建 evalforge-keyword-coverage 独立第三方包，仅依赖 SDK，经真实 Entry Points 安装发现接入 API/Dataset/持久化/Baseline/Gate，覆盖缺失安装、导入失败、重复、配置、执行异常、超时、并发及旧评测器；新增开发文档并执行完整 pytest。
+- 澄清：无追加确认。用户在 Stage 5 验证期间授权继续 Stage 6；先完成 Stage 5 记录，再实现本阶段。关键词只从 Case.metadata.expected_keywords 读取，固定 strip/casefold 去重子串规则；未知不推断，空集合 N/A，非法值 structured error，空回答为有证据零覆盖。
+- 范围：新增独立包与 17 单元测试、10 项实际安装/API/PG E2E、两个 test-only 故障分发包及开发/阶段文档。Stage 6 不改 SDK Registry/Loader 或后端业务实现，不手动 import 插件，无新依赖框架/API/数据库结构。
+- 数据链：pip 安装 SDK/插件 wheel -> 原 build_harness_runner/catalog -> importlib.metadata.entry_points -> allowlist/EntryPoint.load -> 原 Registry -> API Dataset -> 原 Runner 新实例/SDK -> 原 RunRecord/PG JSONB -> 原查询/ExperimentComparison -> Stage 5 规则适配 -> 原 RegressionDetector/Gate。Baseline 1.0、Candidate .5、容忍 .2 -> failed；3 Case 乱序仍按 ID 对齐。
+- 文件：新增 examples/evalforge-keyword-coverage/{pyproject.toml,README.md,.gitignore,src/evalforge_keyword_coverage/__init__.py,tests/test_keyword_coverage_unit.py}；backend/tests/test_keyword_coverage_e2e.py；backend/tests/fixtures/evaluator-fault-plugin/{pyproject.toml,.gitignore,src/evalforge_test_faults.py,src/evalforge_test_import.py,src/evalforge_test_dependency.py}；backend/tests/fixtures/evaluator-duplicate-plugin/{pyproject.toml,.gitignore,src/evalforge_test_duplicate.py}；docs/{extending-evaluators.md,plans/evaluator-plugin-stage6.md}。修改 README.md 索引并追加本记录。
+- 决策：用独立零配置无副作用插件验证公开 SDK 边界；故障包只在测试目录单独 pip --target 安装，不能污染生产插件。所有发现使用真实安装元数据和 EntryPoint.load，不 Mock Registry/metadata。临时 SDK-only venv 先证明未安装不可发现，再安装评分且 app/fastapi 不存在。同名入口全拒绝，第二 Loader 重复注册也拒绝，原项保持。
+- 验证：实际构建安装 SDK 0.3.0/插件 0.1.0。专项首次 26 passed in 65.42s，补重复注册单项 1 passed in .39s；最终完整 pytest backend/tests + SDK/tests + 新包/tests：852 项，851 passed / 1 failed / 0 skipped / 7 warnings in 85.33s，JUnit 解析复核。本阶段新增 27 项全通过。唯一失败仍为 test_v11_experiment.py::test_duplicate_case_is_rejected（预期 ExperimentRunConflictError，旧内存 Store 实抛 ValueError），未更改/屏蔽。已跑真实 PG，旧 Worker 测试用新建专用 agent_harness_test；新 Registry/E2E 用隔离 Schema，旧数据保留。静态 AST/新函数文档/SDK-only 依赖/无 backend 插件导入/安装源码一致/文档围栏/git diff --check 通过。
+- 后续：最终全量仍有上述既有失败，不宣称全绿。substring 覆盖不等于语义正确；大输入限制、包签名/进程隔离、负载和线上部署未实施。允许清单不是沙箱，超时是协作式；安装/更新后重启相关进程。保留测试数据库/Schema，停止临时 PG；未 commit/push，Stage 6 完成后停止。
+
+## 2026-10-25 — 项目展示型 README 重写与 GitHub 同步
+
+- 请求：重写 README，突出项目价值和工程能力，并提交到 GitHub。
+- 澄清：无追加确认。GitHub 同步包含本会话此前已完成且尚未提交的 Evaluator Plugin Stage 0-6 源码、测试、SDK、示例与文档，保证首页能力有对应源码。
+- 范围：重写 README.md 为项目展示入口；新增 docs/GETTING_STARTED.md 承接原完整启动说明，补上公开 SDK 安装步骤并修正迁移后的相对链接；追加本记录。本次不修改业务实现。
+- 展示链：工程问题 -> 智能适配/插件/持久化执行架构 -> 六项核心能力和设计取舍 -> 真实插件安装/API/PostgreSQL/Gate 证据 -> 运行演示 -> 测试与源码导读。
+- 文件：README.md、docs/GETTING_STARTED.md、AI_CHANGELOG.md；此前阶段代码按原已验证状态一并提交，不归为本次新增实现。
+- 决策：以可核对的源码、真实测试和端到端结果展示项目实力，不编造吞吐、模型提升、CI 绿灯或生产部署。保留 852 项、851 通过/1 既有失败/0 跳过及统计范围；前端结果明确为历史验证。详细运行与边界文档从首页可直接访问。
+- 验证：两份文档的本地链接、Markdown 围栏、JSON/TOML 示例验证通过；README 指标选择片段通过实际 EvaluatorSelection 校验。Stage 6 JUnit 数量复核一致。SDK 与独立关键词插件测试本次重跑 107 项通过；git diff --check 通过。完整数据库回归沿用此前 851 passed / 1 failed / 0 skipped 的实测，不重复宣称本次重跑。
+- 后续：保留原重复 Case 异常类型失败和生产演进边界。提交与推送由用户本次明确授权，使用正常提交/快进推送，不改写历史。

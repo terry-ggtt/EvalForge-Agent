@@ -1,3 +1,5 @@
+from app.evaluator.comparison import pair_semantics, paired_delta
+
 from app.harness.metric_semantics import ensure_metric_semantics
 from collections import (
     Counter,
@@ -209,7 +211,12 @@ class ComparisonService:
     ) -> list[
         MetricComparison
     ]:
+        """Pair baseline/candidate metrics by name and preserve missing score/value channels.
 
+        Returns the existing MetricComparison objects with optional SDK
+        producer evidence and finite canonical deltas. Incompatible evidence
+        raises MetricSemanticsError before downstream aggregation.
+        """
         baseline_metrics = (
             cls._metric_map(
                 baseline.result.metrics
@@ -300,8 +307,10 @@ class ComparisonService:
                 == candidate_unit
             )
 
+            semantics = pair_semantics(baseline, candidate, baseline_metric, candidate_metric)
+            delta = paired_delta if semantics is not None else cls._numeric_delta
             value_delta = (
-                cls._numeric_delta(
+                delta(
                     baseline_value,
                     candidate_value,
                 )
@@ -311,6 +320,7 @@ class ComparisonService:
 
             comparisons.append(
                 MetricComparison(
+                    semantics=semantics,
                     name=
                         name,
 
@@ -321,7 +331,7 @@ class ComparisonService:
                         candidate_score,
 
                     score_delta=
-                        cls._numeric_delta(
+                        delta(
                             baseline_score,
                             candidate_score,
                         ),

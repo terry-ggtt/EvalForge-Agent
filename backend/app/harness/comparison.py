@@ -1,3 +1,5 @@
+from app.evaluator.comparison_contracts import PluginMetricSemantics
+
 from typing import (
     Any,
 )
@@ -21,6 +23,7 @@ class MetricComparison(
     """
 
     name: str
+    semantics: PluginMetricSemantics | None = None
 
     baseline_score: (
         float | None

@@ -1,3 +1,5 @@
+from app.evaluator.contracts import EvaluatorChoices, EvaluatorBinding
+
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -50,6 +52,9 @@ class EvaluationJobPayload(BaseModel):
 
     agent_version: str = Field(min_length=1)
 
+    evaluators: EvaluatorChoices | None = None
+    evaluator_plan: list[EvaluatorBinding] | None = None
+
     adapter_id: str | None = Field(default=None, strict=True, min_length=1, max_length=200, pattern=r"\S")
     adapter_version: int | None = Field(default=None, strict=True, ge=1)
     adapter_mapping_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -85,6 +90,8 @@ class EvaluationJobPayload(BaseModel):
     @model_validator(mode="after")
     def validate_cases(self):
         """Validate this job's cases and explicit mapping pair; return self or reject invalid payload."""
+        if self.evaluators is None and self.evaluator_plan is not None:
+            raise ValueError("Evaluator plan requires explicit selections")
         validate_adapter_binding(self.adapter_id, self.adapter_version)
         if self.adapter_id is None and self.adapter_mapping_digest is not None:
             raise ValueError("Mapping digest requires an adapter binding")

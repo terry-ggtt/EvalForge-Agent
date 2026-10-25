@@ -1,3 +1,12 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.evaluator.catalog import EvaluatorCatalog
+    from app.evaluator.contracts import EvaluatorSelection, EvaluatorBinding
+    from app.evaluator.execution import EvaluatorExecution
+
 import asyncio
 from app.adapters.errors import MappingFailure
 from collections.abc import Iterable
@@ -70,12 +79,29 @@ class HarnessRunner:
         run_store:
             RunStore | None = None,
         execution_metadata: dict | None = None,
+        evaluator_catalog: EvaluatorCatalog | None = None,
+        evaluator_execution: EvaluatorExecution | None = None,
+        evaluation_identity: dict | None = None,
     ):
-        """Keep adapter/evaluators, policy/retry options, run_store and server execution_metadata.
+        """Compose the existing Agent/Run persistence flow and optional evaluator execution boundary.
 
-        Returns None; creates no external state. execution_metadata is copied and
-        reserved for explicitly bound jobs; unbound construction remains compatible.
+        Args:
+            adapter: Existing canonical Agent transport.
+            evaluators: Legacy instances used when no explicit selection is bound.
+            policy: Existing case concurrency and Agent timeout settings.
+            retry_policy: Existing Agent retry limits/backoff.
+            retry_decider: Existing Agent retry classification.
+            run_store: Canonical RunRecord persistence, optional for local calls.
+            execution_metadata: Server-owned Agent-visible mapping metadata; never put evaluator config here.
+            evaluator_catalog: Process-start Registry/config resolver, optional for legacy callers.
+            evaluator_execution: Already bound dynamic plan, otherwise retain the legacy loop.
+            evaluation_identity: Known evaluator-only Job/Experiment identities.
+        Returns:
+            None; no Agent, plugin evaluation or persistence occurs.
         """
+        self.evaluator_catalog = evaluator_catalog
+        self.evaluator_execution = evaluator_execution
+        self.evaluation_identity = deepcopy(evaluation_identity or {})
         self.execution_metadata = deepcopy(execution_metadata or {})
         if self.execution_metadata.get("intelligent_adapter"):
             self.execution_metadata["mapping_artifact_ids"] = []
@@ -110,13 +136,45 @@ class HarnessRunner:
             run_store
         )
 
+    def with_evaluators(
+        self, selections: list[EvaluatorSelection], *, plan: list[EvaluatorBinding] | None = None,
+        identity: dict | None = None,
+    ) -> HarnessRunner:
+        """Return a task-local HarnessRunner with selections/plan/identity, preserving transport and persistence.
+
+        selections are validated against the server catalogue; plan optionally
+        pins a queued job's exact declaration/config. No base Runner is mutated.
+        """
+        from app.evaluator.contracts import EvaluatorSelectionError
+        from app.evaluator.execution import EvaluatorExecution
+        if self.evaluator_catalog is None:
+            raise EvaluatorSelectionError("evaluator_catalog_unavailable")
+        resolved = self.evaluator_catalog.resolve(selections, pinned=plan)
+        return HarnessRunner(
+            adapter=self.adapter, evaluators=self.evaluators, policy=self.policy,
+            retry_policy=self.retry_policy, retry_decider=self.retry_decider, run_store=self.run_store,
+            execution_metadata=self.execution_metadata, evaluator_catalog=self.evaluator_catalog,
+            evaluator_execution=EvaluatorExecution(self.evaluator_catalog, resolved),
+            evaluation_identity=identity,
+        )
+
     async def run(
         self,
         dataset: Iterable[
             TestCase | dict
         ],
+        *,
+        evaluators: list[EvaluatorSelection] | None = None,
     ) -> EvaluationReport:
-        """Run dataset cases with configured concurrency; return report, unknown average for mapped pipeline failures."""
+        """Run dataset with existing case concurrency; return a canonical EvaluationReport.
+
+        dataset supplies cases; optional evaluators creates a task-local bound
+        plan before Agent calls. Omitted selection retains legacy evaluation.
+        Cancellation propagates after cancelling/awaiting owned sibling tasks;
+        invalid selection raises before any case starts.
+        """
+        if evaluators is not None:
+            return await self.with_evaluators(evaluators).run(dataset)
         cases = [
             (
                 raw_case
@@ -171,11 +229,13 @@ class HarnessRunner:
             in enumerate(cases)
         ]
 
-        completed = (
-            await asyncio.gather(
-                *tasks
-            )
-        )
+        try:
+            completed = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         completed.sort(
             key=lambda item:
@@ -221,7 +281,12 @@ class HarnessRunner:
         self,
         case: TestCase,
     ) -> CaseResult:
-        """Execute case through agent/mapping/evaluation, persist run, return typed failure without fake mapped score."""
+        """Execute case through the existing Agent/mapping/evaluation and canonical persistence.
+
+        Dynamic evaluator outcomes are independently retained; incomplete quality
+        becomes null with evaluation failure. Unselected legacy behavior stays
+        fail-fast. Cancellation escapes without persisting an unfinished case.
+        """
         context = (
             RunContext.create(
                 case_id=
@@ -295,23 +360,27 @@ class HarnessRunner:
 
             stage = "evaluation"
 
-            metric_results = []
+            evaluation_incomplete = False
+            if self.evaluator_execution is not None:
+                metric_results, evaluation_incomplete = await self.evaluator_execution.evaluate(
+                    case, agent_result, context, self.evaluation_identity)
+            else:
+                metric_results = []
+                for evaluator in (
+                    self.evaluators
+                ):
 
-            for evaluator in (
-                self.evaluators
-            ):
-
-                metric = (
-                    await evaluator
-                    .evaluate(
-                        case,
-                        agent_result,
+                    metric = (
+                        await evaluator
+                        .evaluate(
+                            case,
+                            agent_result,
+                        )
                     )
-                )
 
-                metric_results.append(
-                    metric
-                )
+                    metric_results.append(
+                        metric
+                    )
 
             scored_metrics = [
                 metric.score
@@ -336,12 +405,17 @@ class HarnessRunner:
                 else 0.0
             )
 
+            if self.evaluator_execution is not None and (evaluation_incomplete or not scored_metrics):
+                score = None
+
             if self.execution_metadata.get("intelligent_adapter") and (
                 not scored_metrics or any(metric.details.get("quality_score_unverified") for metric in metric_results)
             ):
                 score = None
 
             result = CaseResult(
+                error="Evaluator execution incomplete" if evaluation_incomplete else None,
+                failure_kind="evaluation" if evaluation_incomplete else None,
                 run_id=
                     context.run_id,
 
@@ -377,7 +451,7 @@ class HarnessRunner:
             return result
 
         except Exception as exc:
-            bound = bool(self.execution_metadata.get("intelligent_adapter"))
+            bound = bool(self.execution_metadata.get("intelligent_adapter")) or self.evaluator_execution is not None
             failure_kind = ("evaluation" if stage == "evaluation" else
                             "mapping" if isinstance(exc, MappingFailure) else "agent_execution")
             if bound:
@@ -779,10 +853,19 @@ class HarnessRunner:
         result: CaseResult,
         context: RunContext,
     ) -> None:
-        """Persist case/result/context; mapped jobs atomically save private artifacts with the canonical RunRecord."""
+        """Persist case/result with context metadata through the canonical RunRecord/Store.
+
+        Add only the safe evaluator plan summary at this persistence boundary,
+        after Agent execution. Mapped jobs retain atomic artifact persistence.
+        Returns None; no store means local-only execution.
+        """
         if self.run_store is None:
             return
 
+        metadata = deepcopy(context.metadata)
+        metadata.pop("evaluator_plan", None)  # Reserved server-owned provenance, never a user assertion.
+        if self.evaluator_execution is not None:
+            metadata["evaluator_plan"] = deepcopy(self.evaluator_execution.summary)
         record = (
             RunRecord.from_execution(
                 case=
@@ -792,7 +875,7 @@ class HarnessRunner:
                     result,
 
                 metadata=
-                    context.metadata,
+                    metadata,
             )
         )
 

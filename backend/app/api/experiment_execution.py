@@ -48,6 +48,7 @@ async def run_experiment(
         ),
 ) -> ExperimentResponse:
 
+    """Execute body's Dataset/optional choices via runner and return the existing Experiment response."""
     cases = [
         case.to_domain()
 
@@ -77,6 +78,7 @@ async def run_experiment(
 
             metadata=
                 body.metadata,
+            **({"evaluators": body.evaluators} if body.evaluators is not None else {}),
         )
     )
 

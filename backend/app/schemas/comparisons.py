@@ -1,3 +1,5 @@
+from app.evaluator.comparison_contracts import PluginMetricSemantics
+
 from pydantic import (
     BaseModel,
     Field,
@@ -54,6 +56,7 @@ class CompareExperimentsRequest(
 class MetricComparisonResponse(
     BaseModel
 ):
+    semantics: PluginMetricSemantics | None = None
     name: str
 
     baseline_score: (
@@ -357,6 +360,8 @@ class RegressionReportResponse(
 class AggregateMetricComparisonResponse(
     BaseModel
 ):
+    semantics: PluginMetricSemantics | None = None
+    matched_case_count: int | None = None
     name: str
 
     score_count: int = 0
@@ -445,6 +450,8 @@ class CaseComparisonResponse(
 class DatasetComparisonResponse(
     BaseModel
 ):
+    evaluator_plan_digest: str | None = None
+    expected_evaluator_ids: list[str] = Field(default_factory=list)
     baseline_run_count: int
 
     candidate_run_count: int
@@ -499,6 +506,8 @@ class DatasetComparisonResponse(
     ) -> "DatasetComparisonResponse":
 
         return cls(
+            evaluator_plan_digest=report.evaluator_plan_digest,
+            expected_evaluator_ids=report.expected_evaluator_ids,
             baseline_run_count=
                 report.baseline_run_count,
 

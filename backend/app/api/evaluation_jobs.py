@@ -57,7 +57,12 @@ async def create_evaluation_job(
     ),
 ) -> EvaluationJobResponse:
 
-    """Queue body as before; explicitly mapped requests additionally require trusted Registry editor identity."""
+    """Queue body via store, pinning optional evaluator choices from request's server catalogue.
+
+    response receives Location; mapped requests retain their existing trusted
+    editor authorization. Invalid evaluator configuration fails before enqueue;
+    neither HTTP path imports plugins or evaluates cases.
+    """
     if body.adapter_id is not None:
         from app.api.adapter_registry import registry_service
         from app.registry.auth import bearer, registry_actor
@@ -66,6 +71,10 @@ async def create_evaluation_job(
         authorize(actor, "editor")
         await registry_service(request)
     payload = body.to_domain()
+    if body.evaluators is not None:
+        from app.api.evaluators import get_evaluator_catalog
+        payload = payload.model_copy(update={
+            "evaluator_plan": get_evaluator_catalog(request).resolve(body.evaluators)})
 
     job = await store.create(payload)
 

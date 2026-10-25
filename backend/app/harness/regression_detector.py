@@ -116,7 +116,11 @@ class RegressionDetector:
         comparison: RunComparison,
         rule: RegressionRule,
     ) -> RegressionFinding:
+        """Apply rule to comparison using existing direction/absolute threshold logic.
 
+        SDK comparisons reuse their canonical delta to avoid numeric boundary
+        drift; required missing values return an unevaluable finding.
+        """
         values = (
             self._resolve_values(
                 comparison,
@@ -160,6 +164,13 @@ class RegressionDetector:
             - baseline
         )
 
+        metric = self._find_metric(comparison, rule.metric_name)
+        if metric is not None and metric.semantics is not None:
+            delta = metric.score_delta if rule.target == "metric_score" else metric.value_delta
+        if delta is None:
+            return RegressionFinding(rule_name=rule.name, target=rule.target, metric_name=rule.metric_name,
+                evaluable=False, regressed=False, threshold=rule.threshold,
+                reason="Required metric delta is unavailable.")
         regressed = (
             self._is_regression(
                 delta=
