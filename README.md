@@ -12,7 +12,7 @@
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)
 
-[架构设计](#系统架构) · [核心能力](#六项核心工程能力) · [端到端证据](#真实端到端验证) · [本地运行](docs/GETTING_STARTED.md) · [开发插件](docs/extending-evaluators.md) · [源码导读](#源码导读)
+[架构设计](#系统架构) · [核心能力](#六项核心工程能力) · [端到端证据](#真实端到端验证) · [本地运行](docs/GETTING_STARTED.md) · [开发插件](docs/extending-evaluators.md) · [RAG 指标接入](packages/rag-evaluators/README.md) · [源码导读](#源码导读)
 
 </div>
 
@@ -38,10 +38,11 @@ Agent 的一次升级，可能同时改变 Prompt、模型、检索策略、工�
 | --- | --- |
 | **异构数据 → AI 生成 → 验证 → 人工审核 → 固定版本执行** | [Intelligent Adapter System](docs/INTELLIGENT_ADAPTER_EVALUATION_INTEGRATION.md) |
 | **独立插件包 → 真实安装 → Entry Points → API 选择 → 持久化 → Gate** | [第三方插件 E2E](docs/plans/evaluator-plugin-stage6.md) |
+| **多阶段检索 → 八项 RAG 指标 → 字段映射 → 原 Store / 版本比较** | [RAG-P1 独立插件](packages/rag-evaluators/README.md) · [验证报告](docs/plans/rag-p1.md) |
 | **持久化 Job → 多 Worker 领取 → Lease / Heartbeat → Checkpoint 恢复** | [执行器](backend/app/jobs/executor.py) · [PostgreSQL JobStore](backend/app/jobs/postgres_store.py) |
 | **React Studio → 样本分析 → Mapping 预览 → 三层验证 → 审核发布** | [Adapter Studio](docs/INTELLIGENT_ADAPTER_STUDIO.md) |
 
-**最近一次完整 Python 回归：852 项实际执行，851 通过、1 项既有失败、0 跳过。** 包含真实 PostgreSQL、SDK / Registry / Loader 与独立插件测试。[查看范围与已知失败](#测试与验证)
+**最近一次完整 Python 回归：963 项实际执行，962 通过、1 项既有失败、0 跳过。** 包含真实 PostgreSQL、SDK / Registry / Loader、独立插件与 RAG-P1 的 111 项专项测试。[查看范围与已知失败](#测试与验证)
 
 ## 系统架构
 
@@ -161,8 +162,43 @@ keyword_coverage = "evalforge_keyword_coverage:KeywordCoverageEvaluator"
 | 回答与要点 | Keyword Match、独立插件 Keyword Coverage；基于明确参考，保留命中解释 |
 | 工具行为 | 工具准确率、效率与参数匹配，检查实际调用轨迹 |
 | 效率与成本 | Latency、Token Usage、Cost / PricingCatalog；缺证据不猜测 |
-| RAG 检索 | Recall@5、MRR@5；依赖人工参考来源标注 |
+| RAG 检索 | 独立插件 Recall@K、Precision@K、Hit@K、MRR@K、nDCG@K；基于 Gold IDs / 分级相关性标注 |
+| RAG 上下文 | Context Relevance、Context Precision（AP）、Context Recall；显式 LLM Judge，保留模型与提示词版本 |
 | 引用与拒答 | citation_recall、citation_grounding、abstention；采用明确的来源与行为规则 |
+
+
+#### RAG-P1：跨项目接入的八项 RAG 指标
+
+检索策略升级需要回答“哪一阶段提升了召回、排序是否更好、给模型的上下文是否足够”。
+[evalforge-rag-evaluators](packages/rag-evaluators) 将这些问题拆成两类证据，复用原插件和存储链路：
+
+| 指标类型 | 已实现指标 | 输入与评测依据 |
+| --- | --- | --- |
+| **确定性检索指标** | Recall@K、Precision@K、Hit@K、MRR@K、nDCG@K | 排序 ID 列表 + Gold IDs / 分级相关性；不调用 LLM |
+| **LLM 上下文指标** | Context Relevance、Context Precision、Context Recall | Query + 上下文文本 + 显式 Judge；Recall 另需参考原子声明 |
+
+- **阶段独立：** Dense、BM25、Fusion、Rerank 分开评估，每项配置动态选择 stage / K。
+- **字段可配置：** 用安全 JSON Pointer 读取 metadata 或 Trace 中的字段；不同项目无需使用同样的业务字段名。插件不依赖后端 app、LangChain 或向量数据库。
+- **标注口径明确：** 支持 Document / Chunk，要求 Gold 与检索结果显式同粒度；不自动将 Chunk ID 当成 Document ID。
+- **边界可审计：** 首次出现去重后取 Top-K，同分保留输入顺序；Precision@K 除以请求 K；nDCG 支持分级标注。缺少必要输入或空正 Gold 返回 `not_applicable`，不给假零分。
+- **原链路集成：** 八个 `rag.*` Entry Points 保留已有评测器，结果进入原 RunStore，并参与 Baseline / Candidate / Gate；保留 evaluator_version、stage、K、配置和统计口径。
+
+通过现有创建任务 API 选择指标，例如比较 Fusion 检索：
+
+```json
+{
+  "evaluators": [
+    {"evaluator_id":"rag.recall_at_k","config":{"stage":"fusion","k":10,"level":"chunk"}},
+    {"evaluator_id":"rag.ndcg_at_k","config":{"stage":"fusion","k":10,"level":"chunk"}}
+  ]
+}
+```
+
+默认从 `case.metadata.rag.gold` 读取标注、从 `result.metadata.rag.stages.<stage>` 读取有序检索结果；自定义字段通过 config.mapping 配置。
+同一项指标的多阶段 / 多 K 扫描使用独立运行，Baseline / Candidate 应保持同一配置。
+三个上下文指标明确标记为 LLM 判断：需要服务端配置兼容端点与 model / revision，不能代替确定性检索证据；同时选择三项每 Case 最多调用三次，尚未做在线质量校准。
+
+[安装、允许清单与字段映射](packages/rag-evaluators/README.md) · [公式、审查与风险](docs/plans/rag-p1.md) · [真实安装 E2E](backend/tests/test_rag_plugins_e2e.py)
 
 
 ### 3. 持久化异步执行：让长评测具备恢复路径
@@ -280,7 +316,11 @@ Candidate 用例顺序反转后仍按 Case ID 对齐。测试直接查询 Postgr
 
 **边界明确：** 这里使用真实 FastAPI ASGI、服务、插件与 PostgreSQL，业务 Agent 为确定性测试响应；没有以 Mock Registry 替代插件发现，也不将此解释为线上模型效果评估。
 
-[完整 E2E 测试](backend/tests/test_keyword_coverage_e2e.py) · [阶段报告](docs/plans/evaluator-plugin-stage6.md)
+[关键词插件 E2E](backend/tests/test_keyword_coverage_e2e.py) · [Stage 6 报告](docs/plans/evaluator-plugin-stage6.md)
+
+**RAG-P1 也沿用同一条真实安装链路。** 新增 111 项专项测试全部通过：101 项 Golden / 算法边界 / Judge 协议测试，以及 10 项安装、API、Mapping、比较与 PostgreSQL Job / Checkpoint 集成测试。LLM 仅使用 HTTP 模拟传输验证请求、响应、预算、错误与取消；不将这些测试解释为线上模型质量证据。
+
+[RAG-P1 E2E](backend/tests/test_rag_plugins_e2e.py) · [Golden 与边界测试](packages/rag-evaluators/tests) · [验证报告](docs/plans/rag-p1.md)
 
 ## 技术栈与项目结构
 
@@ -296,6 +336,7 @@ Candidate 用例顺序反转后仍按 Case ID 对齐。测试直接查询 Postgr
 
 ```text
 packages/evaluator-sdk/                 # 可独立安装的公开协议 / Registry / Loader
+packages/rag-evaluators/                # 八项 RAG 指标 / 阶段与粒度 / 字段映射 / 显式 LLM Judge
 examples/evalforge-keyword-coverage/     # 真正独立的第三方指标包
 backend/
 ├── app/
@@ -318,17 +359,18 @@ docs/                                  # 设计、接入、运行与阶段验证
 
 [**本地安装、数据库初始化与启动步骤 →**](docs/GETTING_STARTED.md)
 
-安装公开 SDK 与示例插件：
+安装公开 SDK、示例插件与 RAG 插件：
 
 ```bash
 python -m pip install ./packages/evaluator-sdk
 python -m pip install ./examples/evalforge-keyword-coverage
+python -m pip install ./packages/rag-evaluators
 ```
 
-服务端授权插件后，重启 API / Worker：
+服务端按需授权插件后，重启 API / Worker；设置允许清单时保留其他仍需使用的插件。下例启用关键词覆盖率与两项 RAG 指标：
 
 ```bash
-export EVALFORGE_EVALUATOR_PLUGINS='{"allowlist":[{"evaluator_id":"keyword_coverage","distribution":"evalforge-keyword-coverage","distribution_version":"0.1.0"}]}'
+export EVALFORGE_EVALUATOR_PLUGINS='{"allowlist":[{"evaluator_id":"keyword_coverage","distribution":"evalforge-keyword-coverage","distribution_version":"0.1.0"},{"evaluator_id":"rag.recall_at_k","distribution":"evalforge-rag-evaluators","distribution_version":"0.1.0"},{"evaluator_id":"rag.ndcg_at_k","distribution":"evalforge-rag-evaluators","distribution_version":"0.1.0"}]}'
 ```
 
 | 演示入口 | 适合展示的工程点 |
@@ -344,11 +386,11 @@ Agent Showcase 使用独立部署的业务 Agent / Bridge，相关模型与数�
 
 ## 测试与验证
 
-最近完整 Python 测试记录：**2026-10-25，852 项，851 passed / 1 failed / 0 skipped，85.33s**。这是一份实际执行结果，不是 CI 状态徽章。
+最近完整 Python 测试记录：**2026-10-27，963 项，962 passed / 1 failed / 0 skipped，132.48s**。这是一份实际执行结果，不是 CI 状态徽章。
 
 ```bash
-# 先安装 SDK / 示例包；数据库变量必须指向专用、隔离的测试 PostgreSQL
-ADAPTER_REGISTRY_TEST_DSN='专用 Registry 测试连接' TEST_POSTGRES_DSN='专用 agent_harness_test 测试连接' backend/.venv/bin/python -m pytest -q --tb=short backend/tests packages/evaluator-sdk/tests examples/evalforge-keyword-coverage/tests
+# 先安装 SDK / 示例包 / RAG 插件；数据库变量必须指向专用、隔离的测试 PostgreSQL
+ADAPTER_REGISTRY_TEST_DSN='专用 Registry 测试连接' TEST_POSTGRES_DSN='专用 agent_harness_test 测试连接' backend/.venv/bin/python -m pytest -q --tb=short backend/tests packages/evaluator-sdk/tests examples/evalforge-keyword-coverage/tests packages/rag-evaluators/tests
 ```
 
 | 验证层次 | 证据 |
@@ -356,11 +398,13 @@ ADAPTER_REGISTRY_TEST_DSN='专用 Registry 测试连接' TEST_POSTGRES_DSN='专�
 | DSL / Runtime / Inspector / Validator / 生成服务 | 合法与非法输入、缺失/null、边界限制、确定性、修复与预算终止 |
 | PostgreSQL / Worker | 原子领取、租约、过期归属、Checkpoint 恢复、事务与并发发布 |
 | SDK / Registry / Loader | 独立协议、实例隔离、版本兼容、真实 Entry Points、来源与重复保护 |
-| 插件 E2E | 本阶段新增 **27 项全部通过**：17 项独立插件测试 + 10 项安装/API/数据库测试 |
+| 关键词插件历史验证 | Stage 6 新增 27 项：17 项独立插件测试 + 10 项安装/API/数据库测试；包含在本次回归范围 |
+| RAG-P1 新增验证 | **111 项全部通过**：101 项 Golden / 边界 / HTTP Judge + 10 项真实安装 / API / Mapping / Store / Comparison / PG Job |
+| RAG 独立安装 | 全新虚拟环境无 app / FastAPI / LangChain，8 个真实 Entry Points 发现、加载与评分通过 |
 | Comparison / Gate | Case 对齐、方向、阈值边界、版本/配置/口径、部分缺失与不可比阻断 |
 | 前端历史验证 | 14 项单元/API 契约、6 项浏览器交互、生产构建与 lint；范围见 [Studio 记录](docs/INTELLIGENT_ADAPTER_STUDIO.md) |
 
-**已知失败：** test_v11_experiment.py::test_duplicate_case_is_rejected 期望 ExperimentRunConflictError，旧内存 Store 实际抛出 ValueError。该问题保留在报告中，未跳过或包装成全绿。完整命令、数据库隔离方式及警告见 [Stage 6 验证报告](docs/plans/evaluator-plugin-stage6.md)。
+**已知失败：** test_v11_experiment.py::test_duplicate_case_is_rejected 期望 ExperimentRunConflictError，旧内存 Store 实际抛出 ValueError。该问题保留在报告中，未跳过或包装成全绿。本次命令、数据库隔离与验证边界见 [RAG-P1 报告](docs/plans/rag-p1.md)；历史记录见 [Stage 6 报告](docs/plans/evaluator-plugin-stage6.md)。
 
 ## 源码导读
 
@@ -379,6 +423,7 @@ ADAPTER_REGISTRY_TEST_DSN='专用 Registry 测试连接' TEST_POSTGRES_DSN='专�
 | 主题 | 文档 |
 | --- | --- |
 | 安装、数据库初始化、API / Worker / 前端启动 | [本地运行](docs/GETTING_STARTED.md) |
+| 通用 RAG 八项指标、阶段/K/字段映射与验证 | [RAG-P1 审查与交付](docs/plans/rag-p1.md) · [独立插件接入](packages/rag-evaluators/README.md) |
 | 独立 SDK、插件注册、安装、评分与安全 | [第三方开发者指南](docs/extending-evaluators.md) |
 | 插件真实安装到 PostgreSQL / Gate | [第三方插件 E2E](docs/plans/evaluator-plugin-stage6.md) |
 | 指标方向、版本、配置与比较口径 | [Plugin Regression Gate](docs/plans/evaluator-plugin-stage5.md) |
@@ -396,6 +441,7 @@ ADAPTER_REGISTRY_TEST_DSN='专用 Registry 测试连接' TEST_POSTGRES_DSN='专�
 - 第三方插件是受信任的同进程 Python；allowlist 不是沙箱，协作式超时不能强制终止恶意阻塞代码。
 - 稳定 Case ID 与版本标签需要配合不可变数据集治理；框架不能自动证明外部模型或资源语义未变化。
 - 规则指标和关键词覆盖提供可解释证据，语义正确性仍需独立标注与校准。
+- LLM 上下文评分需要人工标注校准，和 Gold-ID 检索指标分别解释；当前没有线上 Judge 质量或吞吐量结论。
 - Replay 是执行证据查看；Gate 已有 API，前端 /gate 仍为占位页。
 
 **EvalForge 展示的是一套完整的 AI 评测工程方法：统一接入、受控扩展、可靠执行、证据关联、版本治理与可解释决策。**

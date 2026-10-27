@@ -347,3 +347,27 @@ Preserved:
 - 决策：以可核对的源码、真实测试和端到端结果展示项目实力，不编造吞吐、模型提升、CI 绿灯或生产部署。保留 852 项、851 通过/1 既有失败/0 跳过及统计范围；前端结果明确为历史验证。详细运行与边界文档从首页可直接访问。
 - 验证：两份文档的本地链接、Markdown 围栏、JSON/TOML 示例验证通过；README 指标选择片段通过实际 EvaluatorSelection 校验。Stage 6 JUnit 数量复核一致。SDK 与独立关键词插件测试本次重跑 107 项通过；git diff --check 通过。完整数据库回归沿用此前 851 passed / 1 failed / 0 skipped 的实测，不重复宣称本次重跑。
 - 后续：保留原重复 Case 异常类型失败和生产演进边界。提交与推送由用户本次明确授权，使用正常提交/快进推送，不改写历史。
+
+
+## 2026-10-27 — RAG-P1：通用独立 RAG Evaluator 插件
+
+- Request: 审查并复用现有 SDK/Registry/Entry Points/Runner/Trace Mapping/MetricResult/Store，实现五项 Gold-ID 指标与三项明确标识的 LLM 上下文指标，支持阶段/K/粒度、原 Store、Baseline/Candidate、Golden/边界/E2E，跨项目字段可配置。
+- Clarifications: None required。先按实际仓库审查并向用户说明方案，再实施；沿用原一调用一指标约束，阶段/K 扫描用独立运行，不覆盖旧同名评测器。
+- Scope: 新增 packages/rag-evaluators 0.1.0（12 文件）、backend/tests/test_rag_plugins_e2e.py、docs/plans/rag-p1.md；README.md 增索引，本记录追加。SDK/Registry/Loader 和全部后端生产代码、迁移未修改。
+- Change chain: 第三方观测 -> 原 Adapter/Mapping -> EvaluationContext -> Entry Points/Registry -> 原 Catalog/Runner/EvaluatorExecution -> SDK MetricResult -> 原 RunStore JSONB -> 原查询/Case 对齐/Comparison/Gate；Job 继续使用固定计划和 Checkpoint。
+- Files: packages/rag-evaluators/pyproject.toml 为发行元数据/8 入口；README.md 为安装/输入/公式/Judge/比较契约；.gitignore 排除构建缓存；src/evalforge_rag_evaluators/{__init__,config,inputs,metrics,judge}.py 和 py.typed 为公开类、严格配置、RFC6901 字段适配、八项计算、异步有界 Judge 与类型标记；tests/{golden.json,test_metrics.py,test_judge.py} 为期望向量/算法/协议边界；backend/tests/test_rag_plugins_e2e.py 为真实安装和原全链路验证；docs/plans/rag-p1.md 为审查与报告；根 README.md 索引；AI_CHANGELOG.md 本记录。
+- Decisions: 命名空间 rag.*；先同粒度首次去重再 Top-K，ties=input-order，Precision 分母为请求 K；空正 Gold N/A，空检索有 Gold 为确定性零分，缺必要输入 N/A，已提供错误形状/粒度冲突为 error。nDCG graded exponential gain 用 expm1 稳定实现。Context relevance=布尔均值、precision=AP、recall=显式参考声明支持率；无 LLM 不替代为 ID/关键词。model/revision/profile 显式，端点/密钥仅服务端环境；一次有界请求、无重试/重定向，错误不泄露秘密，取消传播。保存 evaluator_version/stage/k/config/family/statistical_scope；reported model 纳入原可比性校验。
+- Verification: 专项 111 passed / 0 skipped；最终全量 963 collected; 962 passed; 1 existing failure; 0 skipped。唯一既有失败为 test_v11_experiment.py::test_duplicate_case_is_rejected：预期 ExperimentRunConflictError，旧内存 Store 实抛 ValueError。首轮临时库遗漏既有 Job 迁移导致额外 5 项失败，补齐后全量重跑；未修改测试规避。新建 PG16 私有实例/隔离 schema，实际 Job/Checkpoint/JSONB/查询/Comparison/Gate；HTTP Judge 使用模拟传输，没有在线模型调用。全新 venv 安装 SDK/插件 wheel、无 app/FastAPI/LangChain、8 个真实入口/加载/评分通过。AST/50 个新函数文档/依赖边界/wheel 源码一致/独立 Decimal Golden/diff 空白通过。测试 XML 与安装包交付到本次聊天 outputs。
+- Follow-ups: LLM 误差/不确定性和三项三次调用成本、JSON-mode provider 兼容性；粒度/ID 语义和 corpus/reference 修订仍由接入方负责；原整计划比较保守，多阶段/K 用独立运行；未验证 Python 3.11/最低依赖组合、线上 Judge 质量、负载、前端或部署。原同进程可信插件/协作式超时边界不变。临时 PG 测试后停止但保留数据。未 commit/push。
+
+
+## 2026-10-27 — RAG-P1 首页更新与 GitHub 同步
+
+- Request: 更新 README 并同步 GitHub。
+- Clarifications: None required。同步本会话已完成但尚未提交的 RAG-P1 插件、测试和文档，使首页说明与仓库实现一致。
+- Scope: README 增加 RAG-P1 八项指标、通用字段映射、阶段/K/粒度、安装/允许清单、验证与局限；更新最新完整回归数据；追加本记录。RAG-P1 算法和既有后端运行代码不再修改。
+- Change chain: README 工程问题 -> 确定性检索 / LLM 判断 -> 独立插件安装与配置 -> 原执行/存储/比较 -> 测试与源码链接 -> Git 提交与正常远端推送。
+- Files: README.md 为项目首页；AI_CHANGELOG.md 为本记录；上一阶段新增的 packages/rag-evaluators、backend/tests/test_rag_plugins_e2e.py、docs/plans/rag-p1.md 随此次发布提交，职责与验证沿用上条记录。
+- Decisions: 保留原六项能力结构，在插件引擎内介绍 RAG-P1；不将 LLM 判断称为确定性指标，不暗示支持同请求重复指标展开多 K，不隐藏已知失败。只使用正常提交和快进推送，不改写历史。
+- Verification: README/插件 README/阶段报告本地链接、Markdown 围栏、JSON/TOML、允许清单与示例选择配置通过；上一轮 JUnit 再核对为 963 项、962 passed / 1 既有失败 / 0 skipped。文档更新没有重跑数据库或完整 pytest；上一阶段实测结果保持明确日期与范围。git diff --check 通过；远端 main 与修改前本地 HEAD 同步。
+- Follow-ups: 仍保留重复 Case 异常类型既有失败，以及线上 Judge 校准、最低依赖版本和负载验证等边界。用户本轮明确授权 GitHub 同步，不发布 PyPI 或部署服务。

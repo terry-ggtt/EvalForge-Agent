@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalforge-rag-evaluators"
+version = "0.1.0"
+description = "Portable stage-aware retrieval metrics and explicit LLM context judges"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["evalforge-evaluator-sdk>=0.3,<0.4", "pydantic>=2.7,<3", "httpx>=0.27,<1"]
+
+[project.entry-points."evalforge.evaluators"]
+"rag.recall_at_k" = "evalforge_rag_evaluators:RecallAtK"
+"rag.precision_at_k" = "evalforge_rag_evaluators:PrecisionAtK"
+"rag.hit_at_k" = "evalforge_rag_evaluators:HitAtK"
+"rag.mrr_at_k" = "evalforge_rag_evaluators:MRRAtK"
+"rag.ndcg_at_k" = "evalforge_rag_evaluators:NDCGAtK"
+"rag.context_relevance" = "evalforge_rag_evaluators:ContextRelevance"
+"rag.context_precision" = "evalforge_rag_evaluators:ContextPrecision"
+"rag.context_recall" = "evalforge_rag_evaluators:ContextRecall"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+evalforge_rag_evaluators = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
